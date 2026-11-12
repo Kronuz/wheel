@@ -85,12 +85,20 @@ public:
 #endif
 	}
 
-	// Owner: files e at `deadline`, unlinking it first if armed. Always inlined, and as small as
-	// the prototype's arm, so a caller's own wrapper inlines too: a call costs more than the arm.
+	// Owner: files e at `deadline`, unlinking it first if armed. Always inlined, with one call
+	// (arm_slow: a far deadline, or an inbox to file first) so a caller's own wrapper inlines too.
 	[[gnu::always_inline]] void arm(timer_entry& e, std::uint64_t deadline) noexcept {
-		cancel(e);
+		owner_check();
+		bool queued_first = false;
+		if (e.armed()) {
+			unlink(e);
+		} else {
+			queued_first = queued();
+		}
+		const std::uint64_t t = std::max(deadline / tick, cursor_);  // a passed deadline: the cursor's slot
+		if (queued_first || t - cursor_ >= slots) [[unlikely]] { return arm_slow(e, deadline, queued_first); }
 		e.deadline = deadline;
-		file(e);
+		file_at(e, t & mask);
 	}
 	// Owner: unlinks e if armed; a no-op otherwise. An unarmed e may still wait in the inbox, so
 	// the inbox is filed first when it holds anything.
@@ -208,6 +216,12 @@ private:
 		return mine;
 	}
 	bool queued() const noexcept { return queued_.load(std::memory_order_relaxed) != 0; }
+	// arm()'s rare half: files the inbox first when e may wait there, then files e by its deadline.
+	[[gnu::noinline]] void arm_slow(timer_entry& e, std::uint64_t deadline, bool queued_first) noexcept {
+		if (queued_first) { drain_and_unlink(e); }
+		e.deadline = deadline;
+		file(e);
+	}
 	// Files the inbox, then unlinks e if it was waiting there.
 	[[gnu::noinline]] void drain_and_unlink(timer_entry& e) noexcept {
 		drain();

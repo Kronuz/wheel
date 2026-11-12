@@ -68,7 +68,7 @@ public:
 	// Unlinks what is still armed or queued and runs its fire(e, false).
 	~timer_wheel() {
 		owner_check();
-		drain();
+		if (queued()) { drain(); }
 		for (std::size_t w = 0; w < words; ++w) {
 			while (std::uint64_t bits = bits_[w]) {
 				timer_entry* e = head_[w * 64 + static_cast<std::size_t>(std::countr_zero(bits))];
@@ -120,7 +120,7 @@ public:
 	std::size_t expire(std::uint64_t now, F&& fire) {
 		owner_check();
 		assert(!expiring_ && "expire() is not re-entrant");
-		drain();
+		if (queued()) { drain(); }
 		const std::uint64_t last = now / tick;
 		if (last < cursor_) { return 0; }
 		const std::uint64_t first = cursor_;
@@ -206,9 +206,8 @@ private:
 	}
 	bool queued() const noexcept { return queued_.load(std::memory_order_relaxed) != 0; }
 	// Files every entry other threads queued, from the stripes whose bits it takes. Out of line,
-	// so arm, cancel and expire stay small enough to inline.
+	// and called only when queued(), so arm, cancel and expire pay one relaxed load for it.
 	[[gnu::noinline]] void drain() noexcept {
-		if (!queued()) { return; }
 		for (std::uint64_t bits = queued_.exchange(0, std::memory_order_acquire); bits; bits &= bits - 1) {
 			auto& head = inbox_[static_cast<std::size_t>(std::countr_zero(bits))].head;
 			for (timer_entry* e = head.exchange(nullptr, std::memory_order_acquire); e;) {
@@ -224,11 +223,13 @@ private:
 	// reach it, in a slot after the cursor's.
 	void file(timer_entry& e) noexcept {
 		const std::uint64_t t = e.deadline / tick;
-		if (t >= cursor_ + slots) {
+		if (t - cursor_ < slots) {  // within the round: one compare, as a passed t wraps past it
+			file_at(e, t & mask);
+		} else if (t < cursor_) {
+			file_at(e, cursor_ & mask);
+		} else {
 			file_upper(e, t);
-			return;
 		}
-		file_at(e, (t < cursor_ ? cursor_ : t) & mask);
 	}
 	[[gnu::noinline]] void file_upper(timer_entry& e, std::uint64_t t) noexcept {
 		unsigned shift = 12;

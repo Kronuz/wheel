@@ -87,17 +87,12 @@ public:
 
 	// Owner: files e at `deadline`, unlinking it first if armed.
 	void arm(timer_entry& e, std::uint64_t deadline) noexcept {
-		owner_check();
-		if (e.armed()) {
-			unlink(e);
-		} else if (queued()) {  // e may still wait in the inbox
-			drain();
-			if (e.armed()) { unlink(e); }
-		}
+		cancel(e);
 		e.deadline = deadline;
 		file(e);
 	}
-	// Owner: unlinks e if armed; a no-op otherwise.
+	// Owner: unlinks e if armed; a no-op otherwise. An unarmed e may still wait in the inbox, so
+	// the inbox is filed first when it holds anything.
 	void cancel(timer_entry& e) noexcept {
 		owner_check();
 		if (!e.armed() && queued()) { drain(); }
@@ -209,8 +204,9 @@ private:
 		return mine;
 	}
 	bool queued() const noexcept { return queued_.load(std::memory_order_relaxed) != 0; }
-	// Files every entry other threads queued, from the stripes whose bits it takes.
-	void drain() noexcept {
+	// Files every entry other threads queued, from the stripes whose bits it takes. Out of line,
+	// so arm, cancel and expire stay small enough to inline.
+	[[gnu::noinline]] void drain() noexcept {
 		if (!queued()) { return; }
 		for (std::uint64_t bits = queued_.exchange(0, std::memory_order_acquire); bits; bits &= bits - 1) {
 			auto& head = inbox_[static_cast<std::size_t>(std::countr_zero(bits))].head;
@@ -227,18 +223,22 @@ private:
 	// reach it, in a slot after the cursor's.
 	void file(timer_entry& e) noexcept {
 		const std::uint64_t t = e.deadline / tick;
-		std::size_t s;
-		if (t < cursor_ + slots) {
-			s = (t < cursor_ ? cursor_ : t) & mask;
-		} else {
-			unsigned shift = 12;
-			std::size_t level = 0;
-			while (level + 1 < levels && (t >> shift) - (cursor_ >> shift) >= level_slots) {
-				++level;
-				shift += 6;
-			}
-			s = slots + level * level_slots + ((t >> shift) & (level_slots - 1));
+		if (t >= cursor_ + slots) {
+			file_upper(e, t);
+			return;
 		}
+		file_at(e, (t < cursor_ ? cursor_ : t) & mask);
+	}
+	[[gnu::noinline]] void file_upper(timer_entry& e, std::uint64_t t) noexcept {
+		unsigned shift = 12;
+		std::size_t level = 0;
+		while (level + 1 < levels && (t >> shift) - (cursor_ >> shift) >= level_slots) {
+			++level;
+			shift += 6;
+		}
+		file_at(e, slots + level * level_slots + ((t >> shift) & (level_slots - 1)));
+	}
+	void file_at(timer_entry& e, std::size_t s) noexcept {
 		link(e, head_[s]);
 		bits_[s / 64] |= std::uint64_t{1} << (s % 64);
 	}

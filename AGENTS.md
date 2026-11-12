@@ -69,6 +69,10 @@ machine (an exclusive hold); `WHEEL_BENCH_GATE=w` exits 1 when the library misse
   left.
 - **expire() is not re-entrant**, and the due list is detached before any fire, so a fire may
   cancel or re-arm anything.
+- **An unarmed entry with a `next` is still queued.** Only a push's own thread sets its stripe's
+  bit, and only for a push onto an empty stripe, so an owner arm or cancel of such an entry files
+  every stripe (`drain(true)`); the bits alone miss it while the earlier push's bit is pending.
+  `wheel_test shared` holds a push there through `WHEEL_TEST_PUSHED`, a test-only hook.
 
 ## Traps
 
@@ -79,6 +83,7 @@ machine (an exclusive hold); `WHEEL_BENCH_GATE=w` exits 1 when the library misse
   once.
 - `arm_remote` of an entry that is armed or still queued corrupts both lists; the assertion
   catches only the armed case. The caller owns that state.
-- Past 64 producer threads, stripes are shared: still correct, more contention.
+- Past 64 producer threads, stripes are shared: still correct, more contention, and an entry
+  pushed behind a pending bit reaches `expire` only once that bit is set.
 - Benchmarks on this machine move with code and data placement: compare arms in one interleaved
   run with its A/A pair, never across runs (`bench/wheel_bench.sh` does).

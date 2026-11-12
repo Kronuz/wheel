@@ -33,6 +33,11 @@
 #include <cstdint>
 #include <thread>
 
+// A test's hook inside arm_remote(), between a push's CAS and its stripe bit; empty otherwise.
+#ifndef WHEEL_TEST_PUSHED
+#define WHEEL_TEST_PUSHED(stripe, first)
+#endif
+
 namespace wheel {
 
 // What a timer_wheel files: 32 bytes inside its owner, so arming allocates nothing.
@@ -85,28 +90,28 @@ public:
 #endif
 	}
 
-	// Owner: files e at `deadline`, unlinking it first if armed. Always inlined, with one call
-	// (arm_slow: a far deadline, or an inbox to file first) so a caller's own wrapper inlines too.
+	// Owner: files e at `deadline`, unlinking it first if armed. Always inlined; a far deadline, or
+	// an unarmed e that may wait in the inbox, takes its one out-of-line call, arm_slow.
 	[[gnu::always_inline]] void arm(timer_entry& e, std::uint64_t deadline) noexcept {
 		owner_check();
-		bool queued_first = false;
+		bool waits = false;
 		if (e.armed()) {
 			unlink(e);
 		} else {
-			queued_first = queued();
+			waits = queued() | (e.next != nullptr);
 		}
 		const std::uint64_t t = std::max(deadline / tick, cursor_);  // a passed deadline: the cursor's slot
-		if (queued_first || t - cursor_ >= slots) [[unlikely]] { return arm_slow(e, deadline, queued_first); }
+		if (waits || t - cursor_ >= slots) [[unlikely]] { return arm_slow(e, deadline, waits); }
 		e.deadline = deadline;
 		file_at(e, t & mask);
 	}
 	// Owner: unlinks e if armed; a no-op otherwise. An unarmed e may still wait in the inbox, so
-	// the inbox is filed first when it holds anything.
+	// the inbox is filed first when it may hold e (see drain_and_unlink).
 	[[gnu::always_inline]] void cancel(timer_entry& e) noexcept {
 		owner_check();
 		if (e.armed()) {
 			unlink(e);
-		} else if (queued()) {
+		} else if (queued() | (e.next != nullptr)) {
 			drain_and_unlink(e);
 		}
 	}
@@ -121,6 +126,7 @@ public:
 		do {
 			e.next = first;
 		} while (!head.compare_exchange_weak(first, &e, std::memory_order_release, std::memory_order_relaxed));
+		WHEEL_TEST_PUSHED(s, first);
 		if (!first) { queued_.fetch_or(std::uint64_t{1} << s, std::memory_order_release); }
 	}
 
@@ -217,20 +223,28 @@ private:
 	}
 	bool queued() const noexcept { return queued_.load(std::memory_order_relaxed) != 0; }
 	// arm()'s rare half: files the inbox first when e may wait there, then files e by its deadline.
-	[[gnu::noinline]] void arm_slow(timer_entry& e, std::uint64_t deadline, bool queued_first) noexcept {
-		if (queued_first) { drain_and_unlink(e); }
+	[[gnu::noinline]] void arm_slow(timer_entry& e, std::uint64_t deadline, bool waits) noexcept {
+		if (waits) { drain_and_unlink(e); }
 		e.deadline = deadline;
 		file(e);
 	}
-	// Files the inbox, then unlinks e if it was waiting there.
+	// Files the inbox, then unlinks e if it was waiting there. An unarmed e with a `next` waits
+	// behind another push, whose thread may not have set the stripe's bit yet, so every stripe is
+	// filed; an e at the bottom of its stripe has its bit set by its own push, before arm_remote
+	// returns, so the bits find it (docs/timer-wheel.md, Threading contracts).
 	[[gnu::noinline]] void drain_and_unlink(timer_entry& e) noexcept {
-		drain();
+		drain(e.next != nullptr);
 		if (e.armed()) { unlink(e); }
 	}
-	// Files every entry other threads queued, from the stripes whose bits it takes. Out of line,
-	// and called only when queued(), so arm, cancel and expire pay one relaxed load for it.
-	[[gnu::noinline]] void drain() noexcept {
-		for (std::uint64_t bits = queued_.exchange(0, std::memory_order_acquire); bits; bits &= bits - 1) {
+	// Files every entry other threads queued, from the stripes whose bits it takes, and with
+	// `every`, from every stripe that holds any. Out of line, and called only when queued() or for
+	// an entry with a `next`, so arm, cancel and expire pay one relaxed load for it.
+	[[gnu::noinline]] void drain(bool every = false) noexcept {
+		std::uint64_t bits = queued_.exchange(0, std::memory_order_acquire);
+		for (std::size_t s = 0; every && s < stripes; ++s) {
+			if (inbox_[s].head.load(std::memory_order_relaxed)) { bits |= std::uint64_t{1} << s; }
+		}
+		for (; bits; bits &= bits - 1) {
 			auto& head = inbox_[static_cast<std::size_t>(std::countr_zero(bits))].head;
 			for (timer_entry* e = head.exchange(nullptr, std::memory_order_acquire); e;) {
 				timer_entry* following = e->next;
@@ -297,11 +311,9 @@ private:
 	void unlink(timer_entry& e) noexcept {
 		*e.pprev = e.next;
 		if (e.next) { e.next->pprev = e.pprev; }
-		auto** first = head_.data();
-		if (e.pprev >= first && e.pprev < first + all_slots && !*e.pprev) {
-			const std::size_t s = static_cast<std::size_t>(e.pprev - first);
-			bits_[s / 64] &= ~(std::uint64_t{1} << (s % 64));
-		}
+		// A slot's index, or past all_slots for `next` inside an entry or `due_` (one compare).
+		const std::size_t s = (reinterpret_cast<std::uintptr_t>(e.pprev) - reinterpret_cast<std::uintptr_t>(head_.data())) / sizeof(timer_entry*);
+		if (s < all_slots && !*e.pprev) { bits_[s / 64] &= ~(std::uint64_t{1} << (s % 64)); }
 		e.next = nullptr;
 		e.pprev = nullptr;
 		--count_;

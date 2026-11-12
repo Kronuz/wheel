@@ -23,7 +23,8 @@ heartbeats, debouncers and deadlines, where re-arm and cancel are as frequent as
 - **Fires never early, at most one tick late,** and a fire may cancel or re-arm any entry,
   itself included.
 - **Cross-thread arms without a lock:** a CAS on the arming thread's own stripe; the owner
-  drains only the stripes whose bits it takes.
+  drains only the stripes whose bits it takes, or every stripe to arm or cancel an entry that
+  waits behind another push.
 - **`next()` for one reactor timer:** the end of the next occupied 1 ms slot, or the start of
   the next upper span; `never` when empty.
 - **Clock-agnostic:** the wheel never reads a clock, so a simulator's manual clock runs days of

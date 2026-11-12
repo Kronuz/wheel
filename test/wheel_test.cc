@@ -7,12 +7,32 @@
 //             level 0 empty and cost no tick a walk
 //   cross     arm_remote of unarmed entries from 1, 4 and 14 threads while the owner expires:
 //             each fires once, never early
+//   shared    two threads on one stripe, the first held between its push and its bit: the
+//             owner's cancel and arm of the second's entry are exact
 //   drop      a destroyed wheel runs fire(e, false) for what is armed or queued
 //   owner     (Debug) a cancel, a re-arm and an expire from another thread abort
+#include <atomic>
+#include <thread>
+
+// The `shared` case holds one push between its CAS and its stripe bit (wheel.hh's hook).
+namespace hook {
+inline std::atomic<bool> hold{false}, parked{false};
+inline std::atomic<unsigned> held_stripe{~0u};
+inline thread_local bool holder = false;  // this thread's next push is the one held
+inline thread_local unsigned stripe = ~0u;
+inline void pushed(unsigned s, const void* first) {
+	stripe = s;
+	if (!holder || first) { return; }
+	held_stripe = s;
+	parked = true;
+	while (hold.load()) { std::this_thread::yield(); }
+}
+}  // namespace hook
+#define WHEEL_TEST_PUSHED(stripe, first) hook::pushed(stripe, first)
+
 #include "model.hh"
 #include "wheel.hh"
 
-#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -235,6 +255,59 @@ void cross() {
 	}
 }
 
+// Producer A pushes onto an empty stripe and is held before its bit; producer B, a thread on
+// the same stripe, pushes behind it and returns. The owner then cancels or arms B's entry: it
+// must not see an empty inbox (B's cancelled entry fired; B's armed entry was linked while
+// still in the stripe, losing A's).
+void shared() {
+	for (const std::string_view mode : {"cancel", "arm"}) {
+		timer_wheel w(0);
+		timer_entry a, b, c;
+		hook::hold = true;
+		hook::parked = false;
+		std::thread producer_a([&] {
+			hook::holder = true;
+			w.arm_remote(a, 5 * ms);
+		});
+		while (!hook::parked.load()) { std::this_thread::yield(); }
+		const unsigned s = hook::held_stripe.load();
+		// Threads take stripes in turn by first use, so one of the next 64 lands on A's.
+		std::vector<timer_entry> probes(2 * timer_wheel::stripes);
+		bool pushed_b = false;
+		{
+			timer_wheel scratch(0);
+			for (std::size_t k = 0; k < probes.size() && !pushed_b; ++k) {
+				std::thread([&] {
+					scratch.arm_remote(probes[k], 0);
+					if (hook::stripe == s) {
+						w.arm_remote(b, 6 * ms);
+						pushed_b = true;
+					}
+				}).join();
+			}
+		}
+		CHECK(pushed_b && b.next == &a);
+		if (mode == "cancel") {
+			w.cancel(b);
+			CHECK(!b.armed());
+		} else {
+			w.arm(b, 6 * ms);
+			CHECK(b.armed());
+		}
+		w.arm(c, 7 * ms);
+		hook::hold = false;
+		producer_a.join();
+		int fired_a = 0, fired_b = 0, fired_c = 0;
+		w.expire(10 * ms, [&](timer_entry& e) { ++(&e == &a ? fired_a : &e == &b ? fired_b : fired_c); });
+		if (fired_a != 1 || fired_b != (mode == "arm") || fired_c != 1 || w.size() != 0) {
+			std::fprintf(stderr, "shared %.*s: fired a=%d b=%d c=%d size=%zu\n", int(mode.size()), mode.data(), fired_a, fired_b, fired_c, w.size());
+		}
+		CHECK(fired_a == 1 && fired_b == (mode == "arm") && fired_c == 1);
+		CHECK(w.size() == 0 && w.next() == timer_wheel::never);
+		std::printf("shared stripe=%u %.*s ok\n", s, int(mode.size()), mode.data());
+	}
+}
+
 int drops = 0;
 void count_drop(timer_entry& e, bool expired) noexcept {
 	CHECK(!expired && !e.armed());
@@ -305,6 +378,7 @@ int main(int argc, char** argv) {
 	if (only == "all" || only == "model") { model(); }
 	if (only == "all" || only == "far") { far_deadlines(); }
 	if (only == "all" || only == "cross") { cross(); }
+	if (only == "all" || only == "shared") { shared(); }
 	if (only == "all" || only == "drop") { drop(); }
 #ifndef NDEBUG
 	if (only == "all" || only == "owner") { owner(); }

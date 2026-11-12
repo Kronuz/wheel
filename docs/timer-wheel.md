@@ -51,15 +51,25 @@ so every deadline up to `never` has a slot of its own and none aliases one the c
 
 1. **Other threads arm only an unarmed entry**, with `arm_remote(e, deadline)`: it links the entry
    into the thread's stripe through `e.next` (a CAS on that stripe's head, no allocation), and the
-   push that finds its stripe empty sets the stripe's bit. Each thread takes a stripe on first use;
-   past 64 threads stripes are shared. Waking an owner that sleeps is the caller's part. A thread
+   push that finds its stripe empty sets the stripe's bit, after its CAS. Each thread takes a stripe
+   on first use; past 64 threads stripes are shared, so a push can land behind one whose bit is
+   not set yet. Waking an owner that sleeps is the caller's part. A thread
    that is not the owner never re-arms, cancels or reads an entry it handed over until the owner
    gives it back (its fire, say).
 2. **Only the owner arms, re-arms, cancels and expires.** The first such call binds the owner
    thread and every later one is asserted in Debug; `release()` unbinds it once the loop is
    stopped, so teardown's thread may destroy the wheel. An owner `arm` or `cancel` of an unarmed
-   entry files the inbox first when it holds anything, so an entry another thread just armed is
-   re-armed or cancelled exactly.
+   entry that may wait in the inbox files the inbox first, so an entry another thread just armed
+   is re-armed or cancelled exactly:
+   - an entry pushed behind another has a `next`, and its bit may still be pending in the other
+     push's thread, so the owner files every stripe that holds entries;
+   - an entry at the bottom of its stripe has no `next`, and its own push set the bit before
+     `arm_remote` returned, which happens before the owner acts on it, so the bits find it.
+
+   `expire` and `next()` see the inbox only through the bits, so an entry pushed behind a push
+   whose bit is still pending waits for that bit: until the other thread runs its next
+   instruction and its caller wakes the owner. Only shared stripes (past 64 threads) see this
+   delay; the owner's arm and cancel of the entry are exact regardless (`wheel_test shared`).
 
 ## Cost (A1)
 

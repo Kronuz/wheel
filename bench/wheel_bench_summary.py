@@ -121,7 +121,18 @@ def summarize(key: Key, arms: Arms, ref: str, twin: str, gate: str | None) -> bo
         print(f"  {arm:6} runs={len(rs)} " + " ".join(cells))
     if ref not in arms:
         return False
-    metrics = [m for m in PAIRED[row] if m in next(iter(arms[ref].values()))]
+    measured = next(iter(arms[ref].values()))
+    metrics = [m for m in PAIRED[row] if m in measured]
+    unmeasured = {
+        m
+        for m in metrics
+        if any(float(r[m]) == 0 for rs in arms.values() for r in rs.values())
+    }
+    if decide in unmeasured:
+        raise SystemExit(f"{row}: the deciding metric {decide} reads 0 in some run")
+    metrics = [
+        m for m in metrics if m not in unmeasured
+    ]  # 0: the host did not report it
     if twin in arms:
         cells = []
         band = 0.0

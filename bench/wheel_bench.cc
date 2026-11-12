@@ -9,8 +9,10 @@
 //   single ARM N        arm, re-arm, cancel and expire on one thread, on a manual clock
 //   cross ARM P TOTAL   P producer threads arm TOTAL entries (default 1,000,000), one owner
 //                       fires on steady_clock
-// ARM is a, f or w; a2 and f2 run a and f again (the A/A pairs). WHEEL_BENCH_PAD=BYTES allocates
-// that many bytes after the wheel and before the entries (a placement probe, 0 by default).
+// ARM's first letter picks the candidate (a, f or w) and the whole name labels the run: a2 and f2
+// are the A/A twins, w.old a build at another commit. WHEEL_BENCH_PAD=BYTES allocates that many
+// bytes after the wheel and before the entries (a placement probe, 0 by default). Every sample
+// reports the core clock before and after it (ghz0, ghz1: a chain of dependent adds, timed).
 #include "proto.hh"
 #include "wheel.hh"
 
@@ -28,6 +30,8 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+
+#include <time.h>
 
 // Prefixes every candidate's arm and cancel forwarders: a probe passes
 // -DWHEEL_BENCH_FORWARD='[[gnu::always_inline]]' to take the compiler's inlining of them out.
@@ -57,6 +61,28 @@ std::string utc() {
 	char b[32];
 	std::strftime(b, sizeof b, "%FT%TZ", std::gmtime(&t));
 	return b;
+}
+// Nanoseconds of this thread's CPU time: a producer's time on a core, without its waits off one.
+u64 thread_cpu_ns() {
+	timespec ts{};
+	clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+	return static_cast<u64>(ts.tv_sec) * 1'000'000'000 + static_cast<u64>(ts.tv_nsec);
+}
+// The core clock in GHz: 8 dependent one-cycle adds per iteration, 4 ms or so.
+double core_ghz() {
+	constexpr u64 iterations = 1'000'000;
+	u64 x = 0;
+	const u64 t0 = now_ns();
+	for (u64 i = 0; i < iterations; ++i) {
+#if defined(__x86_64__)
+		asm volatile("add $1, %0\n\tadd $1, %0\n\tadd $1, %0\n\tadd $1, %0\n\tadd $1, %0\n\tadd $1, %0\n\tadd $1, %0\n\tadd $1, %0" : "+r"(x));
+#elif defined(__aarch64__)
+		asm volatile("add %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1" : "+r"(x));
+#else
+		return 0;
+#endif
+	}
+	return static_cast<double>(8 * iterations) / static_cast<double>(now_ns() - t0);
 }
 unsigned mod64k(const void* p) { return static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(p) & 0xffff); }
 
@@ -140,9 +166,9 @@ struct cand_w {
 
 template <class F>
 auto dispatch(std::string_view arm, F&& f) {
-	if (arm == "a" || arm == "a2") { return f(static_cast<cand_a*>(nullptr)); }
-	if (arm == "f" || arm == "f2") { return f(static_cast<cand_f*>(nullptr)); }
-	if (arm == "w") { return f(static_cast<cand_w*>(nullptr)); }
+	if (arm.starts_with('a')) { return f(static_cast<cand_a*>(nullptr)); }
+	if (arm.starts_with('f')) { return f(static_cast<cand_f*>(nullptr)); }
+	if (arm.starts_with('w')) { return f(static_cast<cand_w*>(nullptr)); }
 	std::fprintf(stderr, "unknown arm %.*s\n", int(arm.size()), arm.data());
 	std::exit(2);
 }
@@ -173,6 +199,7 @@ void single(std::string_view arm, std::size_t n) {
 	std::printf("start=%s\n", utc().c_str());
 	u64 t_arm = 0, t_rearm = 0, t_cancel = 0, t_expire = 0;
 	std::size_t fired = 0;
+	const double ghz0 = core_ghz();
 	const u64 started = now_ns();
 	std::size_t reps = 0;
 	for (; reps < min_reps || t_arm + t_rearm + t_cancel + t_expire < min_timed_ns; ++reps) {
@@ -196,8 +223,9 @@ void single(std::string_view arm, std::size_t n) {
 	const double ops = static_cast<double>(n * reps);
 	const double arm_ns = t_arm / ops, rearm_ns = t_rearm / ops, cancel_ns = t_cancel / ops, expire_ns = t_expire / ops;
 	std::printf("timed_s=%.3f\n", (now_ns() - started) / 1e9);
-	std::printf("row=single arm=%.*s n=%zu pad=%zu reps=%zu arm_ns=%.2f rearm_ns=%.2f cancel_ns=%.2f expire_ns=%.2f score=%.2f fired=%zu\n",
-		int(arm.size()), arm.data(), n, pad.size(), reps, arm_ns, rearm_ns, cancel_ns, expire_ns, arm_ns + rearm_ns + cancel_ns + expire_ns, fired);
+	const double ghz1 = core_ghz();
+	std::printf("row=single arm=%.*s n=%zu pad=%zu reps=%zu arm_ns=%.2f rearm_ns=%.2f cancel_ns=%.2f expire_ns=%.2f score=%.2f fired=%zu ghz0=%.2f ghz1=%.2f\n",
+		int(arm.size()), arm.data(), n, pad.size(), reps, arm_ns, rearm_ns, cancel_ns, expire_ns, arm_ns + rearm_ns + cancel_ns + expire_ns, fired, ghz0, ghz1);
 	std::printf("end=%s\n", utc().c_str());
 }
 
@@ -205,7 +233,8 @@ void single(std::string_view arm, std::size_t n) {
 // P producers each arm TOTAL / P distinct entries once, at steady_clock now (read every 64 arms)
 // plus uniform [1, window] ms; the owner spins on steady_clock, firing until every entry fired.
 struct cross_result {
-	double producer_ns = 0, span_ms = 0, last_after_deadline_ms = 0, max_late_ms = 0;
+	double producer_ns = 0, producer_cpu_ns = 0, producer_min_ns = 0, producer_max_ns = 0;
+	double span_ms = 0, last_after_deadline_ms = 0, max_late_ms = 0;
 	std::size_t fired = 0, early = 0, twice = 0, missing = 0;
 };
 template <class C>
@@ -220,7 +249,7 @@ cross_result cross_run(std::size_t producers, std::size_t total, u64 window_ms) 
 	C c(now_ns());
 	std::atomic<std::size_t> ready{0};
 	std::atomic<bool> go{false};
-	std::vector<u64> elapsed(producers);
+	std::vector<u64> elapsed(producers), on_cpu(producers);
 	std::vector<std::thread> threads;
 	for (std::size_t p = 0; p < producers; ++p) {
 		threads.emplace_back([&, p] {
@@ -255,11 +284,15 @@ cross_result cross_run(std::size_t producers, std::size_t total, u64 window_ms) 
 	}
 	for (auto& t : threads) { t.join(); }
 	for (auto f : fires) { out.twice += f > 1; out.missing += f == 0; }
-	std::sort(elapsed.begin(), elapsed.end());
-	out.producer_ns = static_cast<double>(elapsed[producers / 2]) / static_cast<double>(per);
-	if (producers % 2 == 0) {
-		out.producer_ns = (static_cast<double>(elapsed[producers / 2 - 1]) + static_cast<double>(elapsed[producers / 2])) / 2.0 / static_cast<double>(per);
-	}
+	auto median_per_arm = [&](std::vector<u64>& v) {
+		std::sort(v.begin(), v.end());
+		const double mid = producers % 2 ? static_cast<double>(v[producers / 2]) : (static_cast<double>(v[producers / 2 - 1]) + static_cast<double>(v[producers / 2])) / 2.0;
+		return mid / static_cast<double>(per);
+	};
+	out.producer_ns = median_per_arm(elapsed);
+	out.producer_min_ns = static_cast<double>(elapsed.front()) / static_cast<double>(per);
+	out.producer_max_ns = static_cast<double>(elapsed.back()) / static_cast<double>(per);
+	out.producer_cpu_ns = median_per_arm(on_cpu);
 	out.span_ms = (last_fire - start) / 1e6;
 	out.last_after_deadline_ms = (last_fire > last_deadline ? last_fire - last_deadline : 0) / 1e6;
 	out.max_late_ms = max_late / 1e6;

@@ -94,7 +94,21 @@ Not for:
 
 ## ⚡ Performance
 
-Pending the A1 rows (`docs/timer-wheel.md`, Cost).
+On macOS x86_64 (i9-9980HK, Apple clang 17, `-O2`), against Detent's owner-only prototype
+wheel (R = 10, exclusive; the full tables and job ids are in
+[docs/timer-wheel.md](docs/timer-wheel.md#cost-a1)):
+
+| Single loop, ns per entry (arm + re-arm + cancel + expire) | prototype | wheel | ratio |
+|---|---|---|---|
+| n = 1,000, harness wrappers inlined | 42.14 | 44.22 | 1.049x |
+| n = 1,000,000, harness wrappers inlined | 349.24 | 322.67 | 0.924x |
+| n = 1,000, default build | 38.30 | 41.84 | 1.092x |
+| n = 1,000,000, default build | 325.41 | 378.06 | 1.162x |
+
+Arm, re-arm and cancel match the prototype once inlined; expire costs 1-4 ns more per entry at
+n = 1,000. In the default build, clang leaves the harness's one-line wrapper around `arm` out of
+line, and that call is the remaining gap. Arms from 1, 4 and 14 threads cost 11-33 ns each, the
+same as the prototype with an inbox.
 
 ## License
 

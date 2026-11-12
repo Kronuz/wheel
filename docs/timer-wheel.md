@@ -63,4 +63,62 @@ so every deadline up to `never` has a slot of its own and none aliases one the c
 
 ## Cost (A1)
 
-Pending the rows.
+Measured with `bench/wheel_bench.sh` (Detent's wheel-evidence harness), exclusive jobs on
+macOS x86_64 (i9-9980HK, Apple clang 17, `-O2`), at wheel:1cd7e7a. Each cell is the median of
+R runs, in ns per operation. Candidate (a) is the owner-only prototype, (f) is (a) with the
+inbox, and (w) is this library. The A/A band is how far apart two identical runs of (a) land.
+
+The harness calls each candidate through a one-line wrapper (`cand_x::arm`). Detent decision D75
+gates A1 on the build that forces those wrappers inline for every candidate alike
+(`WHEEL_BENCH_CXXFLAGS=-DWHEEL_BENCH_FORWARD=[[gnu::always_inline]]`), and reports the default
+build next to it.
+
+**Single loop, wrappers inlined (the A1 row), R = 10, job 261111-234624-f5cc8e:**
+
+| n | | arm | re-arm | cancel | expire | score | w / a | A/A |
+|---|---|---|---|---|---|---|---|---|
+| 1,000 | a | 5.31 | 11.79 | 4.98 | 20.04 | 42.14 | | 23.7% |
+| 1,000 | w | 5.07 | 10.41 | 4.73 | 24.02 | 44.22 | 1.049x | |
+| 1,000,000 | a | 106.97 | 106.48 | 30.75 | 106.30 | 349.24 | | 21.1% |
+| 1,000,000 | w | 101.97 | 96.73 | 28.17 | 97.91 | 322.67 | 0.924x | |
+
+**Single loop, default build, R = 10, job 261111-233420-9245bb:**
+
+| n | | arm | re-arm | cancel | expire | score | w / a | A/A |
+|---|---|---|---|---|---|---|---|---|
+| 1,000 | a | 5.02 | 7.93 | 4.97 | 20.34 | 38.30 | | 10.5% |
+| 1,000 | w | 5.69 | 8.46 | 5.00 | 22.70 | 41.84 | 1.092x | |
+| 1,000,000 | a | 102.77 | 101.39 | 29.42 | 98.89 | 325.41 | | 26.9% |
+| 1,000,000 | w | 133.55 | 117.89 | 28.38 | 98.94 | 378.06 | 1.162x | |
+
+**Cross-thread, R = 5, P producers arming 1,000,000 entries, producer ns per arm.** Every run
+fired each entry once, none early (valid).
+
+| P | f | w | w / f | A/A | job |
+|---|---|---|---|---|---|
+| 1 | 11.24 | 12.65 | 1.125x | 35.1% | 261111-233422-3a6c0b |
+| 4 | 11.32 | 11.11 | 0.981x | 15.4% | 261111-233422-3a6c0b |
+| 14 | 31.99 | 32.62 | 1.020x | 17.4% | 261111-233422-3a6c0b |
+| 1 | 12.48 | 12.55 | 1.006x | 24.2% | 261111-221548-4b10b6 (wheel:94a51c6) |
+| 4 | 11.30 | 11.69 | 1.035x | 23.6% | 261111-221548-4b10b6 |
+| 14 | 34.49 | 32.32 | 0.937x | 38.1% | 261111-221548-4b10b6 |
+
+wheel:94a51c6 and wheel:1cd7e7a run the same `arm_remote`, `drain` and `expire`; only the
+owner's `arm` differs between them.
+
+**What each feature (a) lacks costs:**
+
+- **The inbox test and the far-deadline branch in `arm`:** nothing measurable once inlined. With
+  the wrappers inlined, w's arm, re-arm and cancel sit at or below (a)'s (5.07 vs 5.31 ns at
+  n = 1,000).
+- **Their code size:** clang's inline cost for the harness's `cand_w::arm` is 285. For
+  `cand_a::arm` it is 205, and the threshold at `-O2` is 225 (job 261111-233446-2a29ab). So in
+  the default build, w's wrapper stays a call. That call costs arm +0.67 ns and re-arm +0.53 ns
+  at n = 1,000, and arm +31 ns and re-arm +16 ns at n = 1,000,000; this is the whole default-build
+  gap. The cost is the inbox test, the far branch and `arm`'s one call to `arm_slow`. A caller
+  that calls `timer_wheel::arm` directly inlines it, since `arm` is always inlined.
+- **expire's residue:** +1.2 to +4.3 ns per entry at n = 1,000 across the probes (+3.98 in the
+  A1 row). It disappears at n = 1,000,000 (97.91 vs 106.30). Per call, `expire` does work (a)
+  doesn't: it tests `queued()` and whether the cursor crossed into an upper slot. Neither has been
+  shown to be the cause, which is untraced.
+- **Cross-thread arm:** the same CAS as (f); within the A/A band at every P.

@@ -2,4 +2,3 @@ build/
 build-*/
 *.o
 *.out
-.scratch/

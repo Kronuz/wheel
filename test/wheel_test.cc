@@ -211,18 +211,25 @@ void cross() {
 			});
 		}
 		std::size_t fired = 0;
-		u64 now = 0;
-		while (fired < entries.size()) {
+		u64 now = 0, stop = timer_wheel::never;
+		while (fired < entries.size() && now <= stop) {
 			now += ms / 2;
 			clock.store(now, std::memory_order_relaxed);
 			fired += w.expire(now, [&](timer_entry& e) {
 				CHECK(e.deadline <= now);
 				++fires[static_cast<std::size_t>(&e - entries.data())];
 			});
-			if (done.load() == p && now > 60'000 * ms) { break; }
+			// Every arm read the clock before `done` counted it: none is due after this.
+			if (stop == timer_wheel::never && done.load() == p) { stop = now + 10'200 * ms + ms; }
 		}
 		for (auto& t : threads) { t.join(); }
-		for (int f : fires) { CHECK(f == 1); }
+		std::size_t none = 0, twice = 0;
+		for (int f : fires) {
+			none += f == 0;
+			twice += f > 1;
+		}
+		if (none || twice) { std::fprintf(stderr, "cross producers=%zu fired=%zu never_fired=%zu twice=%zu now_ms=%llu\n", p, fired, none, twice, static_cast<unsigned long long>(now / ms)); }
+		CHECK(none == 0 && twice == 0);
 		CHECK(w.size() == 0 && w.next() == timer_wheel::never);
 		std::printf("cross producers=%zu arms=%zu ok\n", p, entries.size());
 	}

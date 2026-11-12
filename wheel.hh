@@ -85,15 +85,16 @@ public:
 #endif
 	}
 
-	// Owner: files e at `deadline`, unlinking it first if armed.
-	void arm(timer_entry& e, std::uint64_t deadline) noexcept {
+	// Owner: files e at `deadline`, unlinking it first if armed. Always inlined: a call costs more
+	// than the operation, and the inbox check and upper-level search keep compilers from it.
+	[[gnu::always_inline]] void arm(timer_entry& e, std::uint64_t deadline) noexcept {
 		cancel(e);
 		e.deadline = deadline;
 		file(e);
 	}
 	// Owner: unlinks e if armed; a no-op otherwise. An unarmed e may still wait in the inbox, so
 	// the inbox is filed first when it holds anything.
-	void cancel(timer_entry& e) noexcept {
+	[[gnu::always_inline]] void cancel(timer_entry& e) noexcept {
 		owner_check();
 		if (!e.armed() && queued()) { drain(); }
 		if (e.armed()) { unlink(e); }

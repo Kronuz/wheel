@@ -307,12 +307,14 @@ void cross(std::string_view arm, std::size_t producers, std::size_t total) {
 		std::printf("config row=cross arm=%.*s producers=%zu total=%zu window_ms=1000 shape=\"%s\" entry_bytes=%zu clock=steady hw_threads=%u\n",
 			int(arm.size()), arm.data(), producers, total, C::shape, sizeof(typename C::entry), std::thread::hardware_concurrency());
 		std::printf("start=%s\n", utc().c_str());
+		const double ghz0 = core_ghz();
 		const u64 started = now_ns();
 		const auto r = cross_run<C>(producers, total, 1'000);
 		std::printf("timed_s=%.3f\n", (now_ns() - started) / 1e9);
+		const double ghz1 = core_ghz();
 		const bool valid = r.early == 0 && r.twice == 0 && r.missing == 0 && r.last_after_deadline_ms <= 100.0;
-		std::printf("row=cross arm=%.*s p=%zu producer_ns=%.2f span_ms=%.1f last_after_deadline_ms=%.2f max_late_ms=%.2f fired=%zu early=%zu twice=%zu missing=%zu valid=%d\n",
-			int(arm.size()), arm.data(), producers, r.producer_ns, r.span_ms, r.last_after_deadline_ms, r.max_late_ms, r.fired, r.early, r.twice, r.missing, int(valid));
+		std::printf("row=cross arm=%.*s p=%zu producer_ns=%.2f producer_cpu_ns=%.2f producer_min_ns=%.2f producer_max_ns=%.2f span_ms=%.1f last_after_deadline_ms=%.2f max_late_ms=%.2f fired=%zu early=%zu twice=%zu missing=%zu valid=%d ghz0=%.2f ghz1=%.2f\n",
+			int(arm.size()), arm.data(), producers, r.producer_ns, r.producer_cpu_ns, r.producer_min_ns, r.producer_max_ns, r.span_ms, r.last_after_deadline_ms, r.max_late_ms, r.fired, r.early, r.twice, r.missing, int(valid), ghz0, ghz1);
 		std::printf("end=%s\n", utc().c_str());
 		CHECK(r.early == 0 && r.twice == 0 && r.missing == 0);
 	}

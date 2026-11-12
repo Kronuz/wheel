@@ -38,7 +38,7 @@ run_ab() {  # ARM N: ARM's build is the label after its dot, without a twin's .2
 round() {  # R: a round's header, with what else the host is doing
 	local limit
 	limit=$(pmset -g therm 2>/dev/null | awk '/CPU_Speed_Limit/ {print $3}')
-	echo "round=$1 load=\"$(sysctl -n vm.loadavg 2>/dev/null || cut -d' ' -f1-3 /proc/loadavg)\" speed_limit=${limit:-na}"
+	echo "round=$1 load=\"$(sysctl -n vm.loadavg 2>/dev/null || cut -d' ' -f1-3 /proc/loadavg)\" speed_limit=${limit:-na}" | tee -a "$log"
 }
 with_pairs() {  # the arms, each A/A twin after its arm
 	local out=() arm
@@ -48,7 +48,7 @@ with_pairs() {  # the arms, each A/A twin after its arm
 	done
 	echo "${out[@]}"
 }
-[ "$mode" = ab ] || compile "$bin" "$root"
+if [ "$mode" != ab ]; then compile "$bin" "$root"; fi  # an if, so set -e stops a failed build
 echo "start=$(date -u +%FT%TZ)"
 case $mode in
 single)

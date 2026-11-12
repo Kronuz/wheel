@@ -57,6 +57,10 @@ def parse(paths: list[str]) -> dict[Key, Arms]:
                 fields = dict(kv.split("=", 1) for kv in line.split())
                 row = fields["row"]
                 key = (row, int(fields[SIZE[row]]), int(fields.get("pad", "0")))
+                if current in runs[key][fields["arm"]]:
+                    sys.exit(
+                        f"{path}: {fields['arm']} ran twice in round {current} of {key}"
+                    )
                 runs[key][fields["arm"]][current] = fields
     return runs
 

@@ -16,8 +16,9 @@ fuzz/fuzz_ops.cc         libFuzzer: the model driven by the input bytes.
 fuzz/replay.cc           Replays fuzz/corpus/ (inputs the fuzzer found) under every compiler.
 examples/demo.cc         A runnable tour (also a CTest).
 bench/                   Detent's wheel-evidence harness: the prototype (a), (f) and this
-                         library (w); wheel_bench.sh runs the rows, wheel_bench_summary.py
-                         prints medians, A/A bands and ratios.
+                         library (w); wheel_bench.sh runs the rows (and an A/B of two
+                         trees' wheel.hh), wheel_bench_summary.py prints medians, paired
+                         ratios and A/A bands; disasm.sh shows arm and cancel inlined.
 docs/timer-wheel.md      Shape, contracts, far deadlines, cost.
 CMakeLists.txt           INTERFACE target `wheel` (+ alias wheel::wheel), C++20; CTest tests
                          wheel, wheel_alloc, wheel_fuzz_corpus, wheel_demo; -DWHEEL_FUZZ=ON
@@ -39,8 +40,10 @@ cmake -B build-fuzz -DWHEEL_FUZZ=ON -DCMAKE_CXX_COMPILER=clang++ && cmake --buil
 ./build-fuzz/wheel_fuzz -max_total_time=600 -max_len=4096
 ```
 
-The bench rows: `bench/wheel_bench.sh single 10` and `bench/wheel_bench.sh cross 5`, on a quiet
-machine (an exclusive hold); `WHEEL_BENCH_GATE=w` exits 1 when the library misses 1.10x.
+The bench rows: `bench/wheel_bench.sh single` and `bench/wheel_bench.sh cross` (40 rounds each),
+on a quiet machine (an exclusive hold); `WHEEL_BENCH_GATE=w` exits 1 when the library's median
+paired ratio misses 1.10x. A ratio is taken within a round and its 95% interval comes from order
+statistics; the A/A band is the twin's interval, not the runs' min-max, which only widens with R.
 
 ## Conventions
 
@@ -88,4 +91,6 @@ machine (an exclusive hold); `WHEEL_BENCH_GATE=w` exits 1 when the library misse
 - Past 64 producer threads, stripes are shared: still correct, more contention, and an entry
   pushed behind a pending bit reaches `expire` only once that bit is set.
 - Benchmarks on this machine move with code and data placement: compare arms in one interleaved
-  run with its A/A pair, never across runs (`bench/wheel_bench.sh` does).
+  run with its A/A pair, never across runs or builds (`bench/wheel_bench.sh` does). Two builds
+  of the same loop differ by up to 2x on the i9-9980HK; `wheel_bench.sh ab` runs a from both
+  builds to show what layout alone moves.

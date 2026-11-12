@@ -164,7 +164,8 @@ public:
 
 	// Owner: when expire() next has work: the end of the next occupied 1 ms slot, or the start of
 	// the next occupied upper slot's span (its entries move down then); 0 while other threads'
-	// arms wait to be filed (expire() files them); `never` when empty.
+	// arms wait to be filed (expire() files them); `never` when empty, or when only the last tick
+	// before `never` holds entries.
 	std::uint64_t next() const noexcept {
 		if (queued()) { return 0; }
 		if (!count_) { return never; }
@@ -176,7 +177,8 @@ public:
 			if (k == 0) { word &= ~std::uint64_t{0} << (start % 64); }
 			if (word) {
 				const std::size_t s = w * 64 + static_cast<std::size_t>(std::countr_zero(word));
-				best = (cursor_ + ((s - start) & mask) + 1) * tick;
+				const std::uint64_t end = cursor_ + ((s - start) & mask) + 1;
+				best = end > never / tick ? never : end * tick;  // the last tick before `never` ends at it
 				break;
 			}
 		}

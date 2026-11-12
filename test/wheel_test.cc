@@ -127,7 +127,7 @@ void far_deadlines() {
 			timer_entry** at = e.pprev;
 			for (u64 now = start; !fired;) {
 				const u64 wake = w.next();
-				CHECK(wake != timer_wheel::never && wake > now);
+				CHECK(wake > now && (wake != timer_wheel::never || d / timer_wheel::tick == timer_wheel::never / timer_wheel::tick));  // the last tick ends at never
 				now = wake;
 				++wakes;
 				w.expire(now, [&](timer_entry& x) {

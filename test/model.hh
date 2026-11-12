@@ -176,7 +176,12 @@ private:
 			++stats.from_fires;
 			switch (draw(3)) {
 			case 0: cancel(other); break;
-			case 1: remote(other, now_ + draw(5 * ms)); break;
+			case 1: {
+				const u64 at = now_ + draw(5 * ms);
+				remote(other, at);
+				if (at <= now_ && queued_.count(other)) { late_.insert(other); }  // a later fire's arm may file it
+				break;
+			}
 			default: {
 				const u64 at = now_ + draw(3'000 * ms);
 				arm(other, at);

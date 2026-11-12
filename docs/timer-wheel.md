@@ -26,11 +26,15 @@ inbox     64 stripes, a cache line each, and one word of stripe bits
   whose span the cursor entered files its entries again, relative to the new cursor, so they move
   down. The due level-0 entries move to a detached list before any fire runs, so a fire may
   cancel or re-arm any entry, itself included; an entry armed during the fires for a time already
-  due fires on the next call. An entry fires at most one tick after its deadline and never before.
+  due fires on the next call. `expire` never touches an entry after its fire, so a fire may also
+  destroy its own entry. An entry fires at most one tick after its deadline and never before.
 - **next()** is when `expire` next has work: the end of the next occupied 1 ms slot, or the start
   of the next occupied upper slot's span; 0 while the inbox holds arms; `never` when empty. A
   loop arms one timer at it.
-- **Destruction** unlinks what is still armed or queued and calls its `fire(e, false)`.
+- **Destruction** moves what is still armed or queued to a detached list and calls each one's
+  `fire(e, false)` once. A `false` fire means the wheel is dying: the entry is dead, so its
+  owner marks it so and never arms or cancels it on this wheel again. An arm from such a fire
+  is undone (unlinked, unfired), so destruction always ends.
 - **The clock is the owner's:** nanoseconds on `steady_clock` for a reactor, a manual counter for
   a simulator. The wheel never reads a clock.
 

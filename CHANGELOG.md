@@ -24,6 +24,8 @@ All notable changes to `wheel` are recorded here, newest first. The format follo
 - An owner `arm` or `cancel` of an entry pushed behind another on a shared stripe (past 64
   threads) files every stripe first, since the earlier push may not have set its bit yet; task's
   copy read an empty inbox, fired a cancelled entry and linked an armed one while still queued.
+- Destruction fires each dying entry once from a detached list and undoes what those fires
+  arm, where task's copy re-read the bitmaps and looped forever on a `false` fire that re-armed.
 - `arm` and `cancel` are always inlined, and the inbox drain and upper-level filing are out of
   line, so an operation is no call at all; clang had left arm, cancel and file out of line. `arm`
   files a level-0 deadline inline and sends a far one, or an inbox to file first, to one call.

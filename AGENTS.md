@@ -68,11 +68,13 @@ machine (an exclusive hold); `WHEEL_BENCH_GATE=w` exits 1 when the library misse
   check with `nm -C` on the bench build that no `timer_wheel::arm`, `cancel` or `file` symbol is
   left.
 - **expire() is not re-entrant**, and the due list is detached before any fire, so a fire may
-  cancel or re-arm anything.
+  cancel or re-arm anything, or destroy its own entry; never touch an entry after its fire.
 - **An unarmed entry with a `next` is still queued.** Only a push's own thread sets its stripe's
   bit, and only for a push onto an empty stripe, so an owner arm or cancel of such an entry files
   every stripe (`drain(true)`); the bits alone miss it while the earlier push's bit is pending.
   `wheel_test shared` holds a push there through `WHEEL_TEST_PUSHED`, a test-only hook.
+- **The destructor fires each entry once, from a detached list,** and unlinks what those fires
+  arm; re-reading the bitmaps after each fire would loop on a fire that re-arms.
 
 ## Traps
 

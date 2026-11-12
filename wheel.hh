@@ -46,6 +46,7 @@ struct timer_entry {
 	timer_entry** pprev = nullptr;  // the pointer that points here; null while unarmed
 	std::uint64_t deadline = 0;     // nanoseconds on the wheel's clock
 	// What expire() runs at the deadline (true), or a destroyed wheel for an entry still armed (false).
+	// A false fire means the wheel is dying: the entry is dead, never to be armed or cancelled on it.
 	void (*fire)(timer_entry&, bool expired) noexcept = nullptr;
 	bool armed() const noexcept { return pprev != nullptr; }
 };
@@ -70,16 +71,22 @@ public:
 	explicit timer_wheel(std::uint64_t now = 0) noexcept : cursor_(now / tick) {}
 	timer_wheel(const timer_wheel&) = delete;
 	timer_wheel& operator=(const timer_wheel&) = delete;
-	// Unlinks what is still armed or queued and runs its fire(e, false).
+	// Runs fire(e, false) once for each entry still armed or queued, from a detached list, so a
+	// fire may cancel any entry or destroy its own; what such a fire arms is unlinked unfired.
 	~timer_wheel() {
 		owner_check();
 		if (queued()) { drain(); }
+		timer_entry** tail = &due_;
 		for (std::size_t w = 0; w < words; ++w) {
-			while (std::uint64_t bits = bits_[w]) {
-				timer_entry* e = head_[w * 64 + static_cast<std::size_t>(std::countr_zero(bits))];
-				unlink(*e);
-				if (e->fire) { e->fire(*e, false); }
-			}
+			while (std::uint64_t bits = bits_[w]) { tail = detach(*head_[w * 64 + static_cast<std::size_t>(std::countr_zero(bits))], tail); }
+		}
+		while (timer_entry* e = due_) {
+			unlink(*e);
+			if (e->fire) { e->fire(*e, false); }
+		}
+		if (queued()) { drain(); }
+		for (std::size_t w = 0; w < words; ++w) {
+			while (std::uint64_t bits = bits_[w]) { unlink(*head_[w * 64 + static_cast<std::size_t>(std::countr_zero(bits))]); }
 		}
 	}
 
@@ -150,14 +157,7 @@ public:
 			if (!(bits_[s / 64] & (std::uint64_t{1} << (s % 64)))) { continue; }
 			for (timer_entry* e = head_[s]; e;) {
 				timer_entry* following = e->next;
-				if (e->deadline <= now) {
-					unlink(*e);
-					e->next = nullptr;
-					*tail = e;
-					e->pprev = tail;
-					tail = &e->next;
-					++count_;
-				}
+				if (e->deadline <= now) { tail = detach(*e, tail); }
 				e = following;
 			}
 		}
@@ -300,6 +300,15 @@ private:
 		if (owner_ == std::thread::id{}) { owner_ = std::this_thread::get_id(); }
 		assert(owner_ == std::this_thread::get_id() && "a wheel is armed, cancelled and expired only on its owner's thread");
 #endif
+	}
+	// Moves e to the detached list ending at `tail`, keeping it armed; returns the new tail.
+	timer_entry** detach(timer_entry& e, timer_entry** tail) noexcept {
+		unlink(e);
+		e.next = nullptr;
+		*tail = &e;
+		e.pprev = tail;
+		++count_;
+		return &e.next;
 	}
 	void link(timer_entry& e, timer_entry*& head) noexcept {
 		e.next = head;

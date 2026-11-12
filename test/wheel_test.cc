@@ -1,5 +1,5 @@
 // wheel::timer_wheel:
-//   reentry   a fire cancels or re-arms another due entry, or itself
+//   reentry   a fire cancels or re-arms another due entry, or itself, or destroys itself
 //   model     random arm, remote arm, cancel and re-arm, from fires too, against the reference
 //             model (test/model.hh), with deadlines up to `never` and clock jumps of years
 //   far       deadlines beyond a round, up to `never`: never early, at most a tick late, at most
@@ -9,7 +9,8 @@
 //             each fires once, never early
 //   shared    two threads on one stripe, the first held between its push and its bit: the
 //             owner's cancel and arm of the second's entry are exact
-//   drop      a destroyed wheel runs fire(e, false) for what is armed or queued
+//   drop      a destroyed wheel runs fire(e, false) once for what is armed or queued; what such
+//             a fire arms is unlinked, unfired
 //   owner     (Debug) a cancel, a re-arm and an expire from another thread abort
 #include <atomic>
 #include <thread>
@@ -63,19 +64,25 @@ constexpr u64 ms = 1'000'000;
 constexpr u64 day = 86'400'000 * ms;
 
 void reentry() {
-	for (const std::string_view mode : {"cancel", "rearm", "self", "arm-due"}) {
+	for (const std::string_view mode : {"cancel", "rearm", "self", "arm-due", "destroy"}) {
 		timer_wheel w(0);
-		timer_entry a, b, c;
+		timer_entry a, c;
+		auto* owned = new timer_entry;  // b, which destroys itself in "destroy"
+		timer_entry& b = *owned;
 		w.arm(a, 500'000);  // both due in slot 0; b is the list head, a follows
 		w.arm(b, 600'000);
 		int fired_a = 0, fired_b = 0, fired_c = 0;
 		auto fire = [&](timer_entry& e) {
-			if (&e == &b) {
+			if (&e == owned) {
 				++fired_b;
 				if (mode == "cancel") { w.cancel(a); }
 				if (mode == "rearm") { w.arm(a, 50 * ms); }
 				if (mode == "self" && fired_b == 1) { w.arm(b, 1 * ms); }  // due now: fires on the next expire
 				if (mode == "arm-due") { w.arm(c, 0); }
+				if (mode == "destroy") {
+					delete owned;
+					owned = nullptr;
+				}
 			} else if (&e == &a) {
 				++fired_a;
 			} else {
@@ -97,6 +104,8 @@ void reentry() {
 			CHECK(first == 2 && fired_c == 0 && c.armed());
 			CHECK(w.expire(1 * ms, fire) == 1 && fired_c == 1);
 		}
+		if (mode == "destroy") { CHECK(first == 2 && fired_b == 1 && fired_a == 1 && !owned && w.size() == 0); }
+		delete owned;
 		std::printf("reentry mode=%.*s ok\n", int(mode.size()), mode.data());
 	}
 }
@@ -314,6 +323,19 @@ void count_drop(timer_entry& e, bool expired) noexcept {
 	++drops;
 }
 
+// A dying fire that re-arms itself, arms another entry and arm_remote()s a third: it runs once,
+// and the destructor ends with all three unarmed.
+timer_wheel* dying = nullptr;
+timer_entry* also_armed = nullptr;
+timer_entry* also_queued = nullptr;
+int dying_fires = 0;
+void rearm_on_drop(timer_entry& e, bool expired) noexcept {
+	CHECK(!expired && ++dying_fires == 1);
+	dying->arm(e, 1 * ms);
+	dying->arm(*also_armed, 2 * ms);
+	dying->arm_remote(*also_queued, 3 * ms);
+}
+
 void drop() {
 	std::vector<timer_entry> es(5);
 	for (auto& e : es) { e.fire = &count_drop; }
@@ -328,6 +350,17 @@ void drop() {
 	}
 	CHECK(drops == 3 && !es[0].armed() && !es[1].armed() && !es[3].armed());
 	std::printf("drop armed=2 queued=1 dropped=%d ok\n", drops);
+	timer_entry self, other, queued;
+	self.fire = &rearm_on_drop;
+	also_armed = &other;
+	also_queued = &queued;
+	{
+		timer_wheel w(0);
+		dying = &w;
+		w.arm(self, 5 * ms);
+	}
+	CHECK(dying_fires == 1 && !self.armed() && !other.armed() && !queued.armed() && !queued.next);
+	std::printf("drop a dying fire's arms are unlinked unfired ok\n");
 }
 
 #ifndef NDEBUG

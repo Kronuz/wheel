@@ -22,4 +22,5 @@ All notable changes to `wheel` are recorded here, newest first. The format follo
 - `next()` saturates at `never` for an entry due in the last millisecond before it, where task's
   copy wrapped past `UINT64_MAX` to a time already passed.
 - `arm` and `cancel` are always inlined, and the inbox drain and upper-level filing are out of
-  line, so an operation is no call at all; clang had left arm, cancel and file out of line.
+  line, so an operation is no call at all; clang had left arm, cancel and file out of line. `arm`
+  files a level-0 deadline inline and sends a far one, or an inbox to file first, to one call.

@@ -63,8 +63,10 @@ machine (an exclusive hold); `WHEEL_BENCH_GATE=w` exits 1 when the library misse
   refilling the inbox would nest drains without bound.
 - **arm and cancel inline; drain and the upper-level filing do not.** A call per operation was
   the whole macOS gap to the prototype (1.36-1.50x at n = 1,000): clang left arm, cancel and file
-  out of line while drain's loop sat inside them. Keep the hot paths free of loops; check with
-  `nm -C` on the bench build that no `timer_wheel::arm`, `cancel` or `file` symbol is left.
+  out of line while drain's loop sat inside them. arm files a level-0 deadline itself and has one
+  call, `arm_slow`, for a far deadline or an inbox to file first. Keep the hot paths free of loops;
+  check with `nm -C` on the bench build that no `timer_wheel::arm`, `cancel` or `file` symbol is
+  left.
 - **expire() is not re-entrant**, and the due list is detached before any fire, so a fire may
   cancel or re-arm anything.
 

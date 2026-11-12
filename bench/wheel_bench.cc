@@ -29,6 +29,12 @@
 #include <thread>
 #include <vector>
 
+// Prefixes every candidate's arm and cancel forwarders: a probe passes
+// -DWHEEL_BENCH_FORWARD='[[gnu::always_inline]]' to take the compiler's inlining of them out.
+#ifndef WHEEL_BENCH_FORWARD
+#define WHEEL_BENCH_FORWARD
+#endif
+
 namespace {
 using u64 = std::uint64_t;
 constexpr u64 ms = 1'000'000;
@@ -63,8 +69,8 @@ struct cand_a {
 	explicit cand_a(u64 base) : w(std::make_unique<bench::wheel>(base)) {}
 	const void* heads() const { return w.get(); }
 	static u64 deadline(const entry& e) { return e.deadline; }
-	void arm(entry& e, u64 d) { w->arm(e, d); }
-	void cancel(entry& e) { w->cancel(e); }
+	WHEEL_BENCH_FORWARD void arm(entry& e, u64 d) { w->arm(e, d); }
+	WHEEL_BENCH_FORWARD void cancel(entry& e) { w->cancel(e); }
 	template <class F>
 	std::size_t expire(u64 now, F&& f) { return w->expire(now, [&](bench::wheel_entry& e) { f(e); }); }
 };
@@ -88,8 +94,8 @@ struct cand_f {
 	explicit cand_f(u64 base) : w(std::make_unique<bench::wheel>(base)) {}
 	const void* heads() const { return w.get(); }
 	static u64 deadline(const entry& e) { return e.deadline; }
-	void arm(entry& e, u64 d) { w->arm(e, d); }
-	void cancel(entry& e) { w->cancel(e); }
+	WHEEL_BENCH_FORWARD void arm(entry& e, u64 d) { w->arm(e, d); }
+	WHEEL_BENCH_FORWARD void cancel(entry& e) { w->cancel(e); }
 	// Any thread, an unarmed entry: `next` links its stripe until the owner files it.
 	void arm_from(entry& e, u64 d) {
 		e.deadline = d;
@@ -125,8 +131,8 @@ struct cand_w {
 	explicit cand_w(u64 base) : w(std::make_unique<wheel::timer_wheel>(base)) {}
 	const void* heads() const { return w.get(); }
 	static u64 deadline(const entry& e) { return e.deadline; }
-	void arm(entry& e, u64 d) { w->arm(e, d); }
-	void cancel(entry& e) { w->cancel(e); }
+	WHEEL_BENCH_FORWARD void arm(entry& e, u64 d) { w->arm(e, d); }
+	WHEEL_BENCH_FORWARD void cancel(entry& e) { w->cancel(e); }
 	void arm_from(entry& e, u64 d) { w->arm_remote(e, d); }
 	template <class F>
 	std::size_t expire(u64 now, F&& f) { return w->expire(now, [&](wheel::timer_entry& e) { f(e); }); }

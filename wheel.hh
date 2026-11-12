@@ -85,8 +85,8 @@ public:
 #endif
 	}
 
-	// Owner: files e at `deadline`, unlinking it first if armed. Always inlined: a call costs more
-	// than the operation, and the inbox check and upper-level search keep compilers from it.
+	// Owner: files e at `deadline`, unlinking it first if armed. Always inlined, and as small as
+	// the prototype's arm, so a caller's own wrapper inlines too: a call costs more than the arm.
 	[[gnu::always_inline]] void arm(timer_entry& e, std::uint64_t deadline) noexcept {
 		cancel(e);
 		e.deadline = deadline;
@@ -96,8 +96,11 @@ public:
 	// the inbox is filed first when it holds anything.
 	[[gnu::always_inline]] void cancel(timer_entry& e) noexcept {
 		owner_check();
-		if (!e.armed() && queued()) { drain(); }
-		if (e.armed()) { unlink(e); }
+		if (e.armed()) {
+			unlink(e);
+		} else if (queued()) {
+			drain_and_unlink(e);
+		}
 	}
 	// Any thread, an unarmed entry: `next` links its stripe until the owner files it. The owner
 	// learns of it at its next expire(); waking an owner that sleeps is the caller's part.
@@ -205,6 +208,11 @@ private:
 		return mine;
 	}
 	bool queued() const noexcept { return queued_.load(std::memory_order_relaxed) != 0; }
+	// Files the inbox, then unlinks e if it was waiting there.
+	[[gnu::noinline]] void drain_and_unlink(timer_entry& e) noexcept {
+		drain();
+		if (e.armed()) { unlink(e); }
+	}
 	// Files every entry other threads queued, from the stripes whose bits it takes. Out of line,
 	// and called only when queued(), so arm, cancel and expire pay one relaxed load for it.
 	[[gnu::noinline]] void drain() noexcept {
@@ -222,14 +230,12 @@ private:
 	// already passed goes in the cursor's slot), else in the lowest upper level whose 64 slots
 	// reach it, in a slot after the cursor's.
 	void file(timer_entry& e) noexcept {
-		const std::uint64_t t = e.deadline / tick;
-		if (t - cursor_ < slots) {  // within the round: one compare, as a passed t wraps past it
-			file_at(e, t & mask);
-		} else if (t < cursor_) {
-			file_at(e, cursor_ & mask);
-		} else {
-			file_upper(e, t);
+		std::uint64_t t = e.deadline / tick;
+		if (t - cursor_ >= slots) {  // past the round, or passed (which wraps past it)
+			if (t >= cursor_) { return file_upper(e, t); }
+			t = cursor_;
 		}
+		file_at(e, t & mask);
 	}
 	[[gnu::noinline]] void file_upper(timer_entry& e, std::uint64_t t) noexcept {
 		unsigned shift = 12;

@@ -380,6 +380,26 @@ bool aborts_off_owner(Op op) {
 	waitpid(pid, &status, 0);
 	return WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT;
 }
+// A dying fire that calls expire() must abort, not overwrite the destructor's detached list.
+void expire_on_drop(timer_entry&, bool) noexcept { dying->expire(1 * ms); }
+bool dying_expire_aborts() {
+	std::fflush(stdout);
+	const pid_t pid = fork();
+	if (pid == 0) {
+		{
+			timer_wheel w(0);
+			timer_entry e, f;
+			e.fire = f.fire = &expire_on_drop;
+			dying = &w;
+			w.arm(e, 5 * ms);
+			w.arm(f, 5 * ms);
+		}
+		std::_Exit(0);  // not reached: the destructor aborts
+	}
+	int status = 0;
+	waitpid(pid, &status, 0);
+	return WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT;
+}
 void owner() {
 	CHECK(aborts_off_owner([](timer_wheel& w, timer_entry& e) { w.cancel(e); }));
 	CHECK(aborts_off_owner([](timer_wheel& w, timer_entry& e) { w.arm(e, 9 * ms); }));
@@ -401,6 +421,8 @@ void owner() {
 		CHECK(!e.armed());
 	}
 	std::printf("owner cancel, re-arm and expire off the owner abort; release hands over ok\n");
+	CHECK(dying_expire_aborts());
+	std::printf("owner a dying fire's expire aborts ok\n");
 }
 #endif
 }  // namespace

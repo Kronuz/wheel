@@ -255,7 +255,7 @@ cross_result cross_run(std::size_t producers, std::size_t total, u64 window_ms) 
 		threads.emplace_back([&, p] {
 			ready.fetch_add(1);
 			while (!go.load(std::memory_order_acquire)) {}
-			const u64 t0 = now_ns();
+			const u64 c0 = thread_cpu_ns(), t0 = now_ns();
 			u64 now = t0;
 			for (std::size_t k = 0; k < per; ++k) {
 				if ((k & 63) == 0) { now = now_ns(); }
@@ -263,6 +263,7 @@ cross_result cross_run(std::size_t producers, std::size_t total, u64 window_ms) 
 				c.arm_from(entries[i], now + offsets[i]);
 			}
 			elapsed[p] = now_ns() - t0;
+			on_cpu[p] = thread_cpu_ns() - c0;
 		});
 	}
 	while (ready.load() != producers) {}

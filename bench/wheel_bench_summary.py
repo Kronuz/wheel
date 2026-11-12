@@ -9,7 +9,9 @@ larger relative min-max spread, or their medians' difference if wider) is printe
 
 A candidate passes when its interval's top is at most 1.10, fails when its bottom is above, and is
 inconclusive otherwise. With --gate ARM, exits 1 when ARM's median paired ratio exceeds 1.10 in any
-row. --ref and --twin replace the reference and twin arms; --arms limits the arms compared.
+row, or when a row compares nothing: no reference arm, no ARM, or no round both ran. A metric that
+reads 0 in any run stops the summary. --ref and --twin replace the reference and twin arms; --arms
+limits the arms compared.
 """
 
 from __future__ import annotations
@@ -97,8 +99,10 @@ def fmt(m: float, lo: float, hi: float) -> str:
     return f"{m:.3f} [{lo:.3f}-{hi:.3f}]"
 
 
-def summarize(key: Key, arms: Arms, ref: str, twin: str, gate: str | None) -> bool:
-    """Prints one row; returns whether `gate` missed 1.10 there."""
+def summarize(
+    key: Key, arms: Arms, ref: str, twin: str, gate: str | None
+) -> str | None:
+    """Prints one row; returns why `gate` fails there (missed 1.10, or nothing compared), if it does."""
     row, size, pad = key
     decide = PAIRED[row][0]
     rounds = len({r for rs in arms.values() for r in rs})
@@ -120,19 +124,12 @@ def summarize(key: Key, arms: Arms, ref: str, twin: str, gate: str | None) -> bo
             cells.append(f"valid={all(r['valid'] == '1' for r in rs)}")
         print(f"  {arm:6} runs={len(rs)} " + " ".join(cells))
     if ref not in arms:
-        return False
+        return f"no reference arm {ref}" if gate is not None else None
     measured = next(iter(arms[ref].values()))
     metrics = [m for m in PAIRED[row] if m in measured]
-    unmeasured = {
-        m
-        for m in metrics
-        if any(float(r[m]) == 0 for rs in arms.values() for r in rs.values())
-    }
-    if decide in unmeasured:
-        raise SystemExit(f"{row}: the deciding metric {decide} reads 0 in some run")
-    metrics = [
-        m for m in metrics if m not in unmeasured
-    ]  # 0: the host did not report it
+    for m in metrics:
+        if any(float(r[m]) == 0 for rs in arms.values() for r in rs.values()):
+            raise SystemExit(f"{row}: {m} reads 0 in some run")
     if twin in arms:
         cells = []
         band = 0.0
@@ -146,7 +143,8 @@ def summarize(key: Key, arms: Arms, ref: str, twin: str, gate: str | None) -> bo
         minmax = max(abs(mx - my) / mx, spread(xs), spread(ys))
         print(f"  A/A band on {decide}: {band:.1%} (min-max band {minmax:.1%})")
         print(f"  {twin}/{ref} " + ", ".join(cells))
-    missed = False
+    missed = None
+    compared = False
     for arm in sorted(arms):
         if arm in (ref, twin):
             continue
@@ -170,10 +168,15 @@ def summarize(key: Key, arms: Arms, ref: str, twin: str, gate: str | None) -> bo
                     else "inconclusive"
                 )
                 verdict += f" (ratio of medians {of_medians:.3f})"
-                missed |= arm == gate and m > THRESHOLD
+                if arm == gate:
+                    compared = True
+                    if m > THRESHOLD:
+                        missed = f"{gate} median ratio {m:.3f} above {THRESHOLD}"
         print(
             f"  {arm}/{ref} " + ", ".join(cells) + (f": {verdict}" if verdict else "")
         )
+    if gate is not None and missed is None and not compared:
+        return f"nothing compared: {gate} has no round paired with {ref}"
     return missed
 
 
@@ -188,14 +191,17 @@ def main() -> int:
     parser.add_argument("logs", nargs="+")
     args = parser.parse_args()
     failed: list[str] = []
-    for key, arms in sorted(parse(args.logs).items()):
+    rows = parse(args.logs)
+    if args.gate is not None and not rows:
+        failed.append("no rows in the logs")
+    for key, arms in sorted(rows.items()):
         if args.arms:
             keep = set(args.arms.split(","))
             arms = {a: rs for a, rs in arms.items() if a in keep}
         row = key[0]
         ref, twin = args.ref or REF[row][0], args.twin or REF[row][1]
-        if summarize(key, arms, ref, twin, args.gate):
-            failed.append(f"{row} {SIZE[row]}={key[1]}")
+        if reason := summarize(key, arms, ref, twin, args.gate):
+            failed.append(f"{row} {SIZE[row]}={key[1]} ({reason})")
     if args.gate is not None:
         print(
             f"\ngate {args.gate}: "

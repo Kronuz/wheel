@@ -73,6 +73,7 @@ public:
 	timer_wheel& operator=(const timer_wheel&) = delete;
 	// Runs fire(e, false) once for each entry still armed or queued, from a detached list, so a
 	// fire may cancel any entry or destroy its own; what such a fire arms is unlinked unfired.
+	// A dying fire never calls expire() (Debug-asserted).
 	~timer_wheel() {
 		owner_check();
 		if (queued()) { drain(); }
@@ -80,10 +81,12 @@ public:
 		for (std::size_t w = 0; w < words; ++w) {
 			while (std::uint64_t bits = bits_[w]) { tail = detach(*head_[w * 64 + static_cast<std::size_t>(std::countr_zero(bits))], tail); }
 		}
+		expiring_ = true;  // a dying fire's expire() would overwrite due_ (asserted)
 		while (timer_entry* e = due_) {
 			unlink(*e);
 			if (e->fire) { e->fire(*e, false); }
 		}
+		expiring_ = false;
 		if (queued()) { drain(); }
 		for (std::size_t w = 0; w < words; ++w) {
 			while (std::uint64_t bits = bits_[w]) { unlink(*head_[w * 64 + static_cast<std::size_t>(std::countr_zero(bits))]); }
@@ -143,7 +146,7 @@ public:
 	template <typename F>
 	std::size_t expire(std::uint64_t now, F&& fire) {
 		owner_check();
-		assert(!expiring_ && "expire() is not re-entrant");
+		assert(!expiring_ && "expire() is not re-entrant, nor called by a dying fire");
 		if (queued()) { drain(); }
 		const std::uint64_t last = now / tick;
 		if (last < cursor_) { return 0; }

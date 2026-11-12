@@ -34,7 +34,8 @@ inbox     64 stripes, a cache line each, and one word of stripe bits
 - **Destruction** moves what is still armed or queued to a detached list and calls each one's
   `fire(e, false)` once. A `false` fire means the wheel is dying: the entry is dead, so its
   owner marks it so and never arms or cancels it on this wheel again. An arm from such a fire
-  is undone (unlinked, unfired), so destruction always ends.
+  is undone (unlinked, unfired), so destruction always ends. A dying fire never calls `expire()`,
+  which would overwrite the detached list (Debug-asserted).
 - **The clock is the owner's:** nanoseconds on `steady_clock` for a reactor, a manual counter for
   a simulator. The wheel never reads a clock.
 

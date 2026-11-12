@@ -46,7 +46,7 @@ namespace {
 using u64 = std::uint64_t;
 constexpr u64 ms = 1'000'000;
 
-void wheel() {
+void owner_ops() {
 	constexpr std::size_t n = 1000;
 	std::vector<wheel::timer_entry> entries(n);
 	auto w = std::make_unique<wheel::timer_wheel>(0);
@@ -67,7 +67,7 @@ void wheel() {
 	const std::size_t during = allocations.load() - before;
 	CHECK(fired == 20 * n && w->size() == 0);
 	CHECK(!COUNTS || during == 0);
-	std::printf("wheel ops=%zu allocations=%zu ok\n", std::size_t(20 * n * 5), during);
+	std::printf("owner ops=%zu allocations=%zu ok\n", std::size_t(20 * n * 5), during);
 }
 
 // Arms from another thread, its stripe already chosen, filed and fired by the owner.
@@ -102,7 +102,7 @@ void remote() {
 }  // namespace
 
 int main() {
-	wheel();
+	owner_ops();
 	remote();
 	std::printf("wheel_alloc_test: ok (counting=%d)\n", COUNTS);
 	return 0;

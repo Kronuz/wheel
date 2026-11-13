@@ -464,7 +464,8 @@ bool dying_expire_aborts() {
 		{
 			timer_wheel w(0);
 			timer_entry e, f;
-			e.fire = f.fire = &expire_on_drop;
+			e.fire = &expire_on_drop;
+			f.fire = [](timer_entry&, bool) noexcept {};
 			dying = &w;
 			w.arm(e, 5 * ms);
 			w.arm(f, 5 * ms);

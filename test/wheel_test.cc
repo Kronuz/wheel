@@ -11,7 +11,7 @@
 //             owner's cancel and arm of the second's entry are exact
 //   scan      expire from every cursor offset in its word and the ring, over every span: each due
 //             entry fires once, in slot order
-//   sparse    (optimized, no sanitizer) a wake that jumps over empty time costs under 1 us
+//   sparse    a wake that jumps over empty time visits at most 65 bitmap words
 //   drop      a destroyed wheel runs fire(e, false) once for what is armed or queued; what such
 //             a fire arms is unlinked, unfired
 //   owner     (Debug) a cancel, a re-arm and an expire from another thread abort
@@ -24,6 +24,7 @@ inline std::atomic<bool> hold{false}, parked{false};
 inline std::atomic<unsigned> held_stripe{~0u};
 inline thread_local bool holder = false;  // this thread's next push is the one held
 inline thread_local unsigned stripe = ~0u;
+inline std::atomic<std::size_t> scanned{0};  // expire()'s bitmap words visited
 inline void pushed(unsigned s, const void* first) {
 	stripe = s;
 	if (!holder || first) { return; }
@@ -33,6 +34,7 @@ inline void pushed(unsigned s, const void* first) {
 }
 }  // namespace hook
 #define WHEEL_TEST_PUSHED(stripe, first) hook::pushed(stripe, first)
+#define WHEEL_TEST_SCANNED() hook::scanned.fetch_add(1, std::memory_order_relaxed)
 
 #include "model.hh"
 #include "wheel.hh"
@@ -405,49 +407,35 @@ void scan() {
 	std::printf("scan offsets=%zu spans=%zu fired=%zu ok\n", std::size(offsets), std::size(spans), checked);
 }
 
-// A far jump costs the words it crosses, not the slots: 1,000 keys over 24 h woken at next() take
-// about 0.2 us a wake, against 2 us when each of the 4,096 slots was visited. Timing, so only an
-// optimized build without a sanitizer asserts it; the best of 30 runs filters a busy host.
-#if defined(NDEBUG) && !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_THREAD__)
-#if defined(__has_feature)
-#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(undefined_behavior_sanitizer)
-#define WHEEL_TEST_NO_TIMING
-#endif
-#endif
-#else
-#define WHEEL_TEST_NO_TIMING
-#endif
+// A wake that jumps over empty time visits the bitmap words it crosses, not its slots: at most 65
+// words for a full round of 4,096 slots, one for a 1 ms step. Counted through WHEEL_TEST_SCANNED.
 void sparse() {
-#ifdef WHEEL_TEST_NO_TIMING
-	std::printf("sparse skipped (debug or sanitizer build)\n");
-#else
 	constexpr std::size_t n = 1000;
 	std::vector<timer_entry> es(n);
 	std::mt19937_64 random(7);
-	std::vector<u64> at(n);
-	for (auto& d : at) { d = 1 * ms + random() % (86'400'000 * ms); }
-	double best = 1e18;
-	std::size_t wakes = 0;
-	for (int trial = 0; trial < 30; ++trial) {
-		timer_wheel w(0);
-		for (std::size_t i = 0; i < n; ++i) {
-			es[i].fire = [](timer_entry&, bool) noexcept {};
-			w.arm(es[i], at[i]);
-		}
-		wakes = 0;
-		std::size_t fired = 0;
-		const auto t0 = std::chrono::steady_clock::now();
-		for (u64 t = 0; t != timer_wheel::never; t = w.next()) {
-			fired += w.expire(t);
-			++wakes;
-		}
-		const auto ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count();
-		CHECK(fired == n && wakes > n);
-		best = std::min(best, ns / static_cast<double>(wakes));
+	timer_wheel w(0);
+	for (auto& e : es) {
+		e.fire = [](timer_entry&, bool) noexcept {};
+		w.arm(e, 1 * ms + random() % (86'400'000 * ms));
 	}
-	std::printf("sparse wakes=%zu best %.0f ns a wake\n", wakes, best);
-	CHECK(best < 1000);
-#endif
+	std::size_t wakes = 0, fired = 0, worst = 0;
+	for (u64 t = 0; t != timer_wheel::never; t = w.next()) {
+		const std::size_t before = hook::scanned.load();
+		fired += w.expire(t);
+		worst = std::max<std::size_t>(worst, hook::scanned.load() - before);
+		++wakes;
+	}
+	CHECK(fired == n && wakes > n);
+	CHECK(worst <= 65);
+	// one empty step is one word; a whole empty round is 64 or 65
+	timer_wheel idle(0);
+	std::size_t before = hook::scanned.load();
+	idle.expire(0);
+	CHECK(hook::scanned.load() - before == 1);
+	before = hook::scanned.load();
+	idle.expire(10'000 * ms);
+	CHECK(hook::scanned.load() - before >= 64 && hook::scanned.load() - before <= 65);
+	std::printf("sparse wakes=%zu, at most %zu words a wake ok\n", wakes, worst);
 }
 
 #ifndef NDEBUG

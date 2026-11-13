@@ -26,6 +26,12 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(wheel_alloc_test PRIVATE wheel Threads::Threads)
   add_test(NAME wheel_alloc COMMAND wheel_alloc_test)
 
+  # The bench summary's --gate on synthetic logs.
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_FOUND)
+    add_test(NAME wheel_summary_gate COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/summary_gate_test.py)
+  endif()
+
   # The checked-in fuzz corpus, replayed by every compiler.
   add_executable(wheel_fuzz_replay fuzz/replay.cc fuzz/fuzz_ops.cc)
   target_link_libraries(wheel_fuzz_replay PRIVATE wheel)

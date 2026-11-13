@@ -37,6 +37,10 @@
 #ifndef WHEEL_TEST_PUSHED
 #define WHEEL_TEST_PUSHED(stripe, first)
 #endif
+// A test's counter in expire(), once per bitmap word of slots it visits; empty otherwise.
+#ifndef WHEEL_TEST_SCANNED
+#define WHEEL_TEST_SCANNED()
+#endif
 
 namespace wheel {
 
@@ -157,6 +161,7 @@ public:
 		timer_entry** tail = &due_;  // the due list keeps slot order
 		// The occupied slots of [first, first + left), a bitmap word at a time: a far jump skips empty time.
 		for (std::size_t s = first & mask; left;) {
+			WHEEL_TEST_SCANNED();
 			const std::size_t bit = s % 64;
 			const std::uint64_t span = std::min<std::uint64_t>(left, 64 - bit);
 			std::uint64_t word = bits_[s / 64] >> bit;

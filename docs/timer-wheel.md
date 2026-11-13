@@ -130,11 +130,29 @@ The worst fire after its deadline in that run, median over rounds (the minimum t
 over 40 rounds), in ms: the wheel 0.20 (0.14 to 0.94) at P = 1, 3.42 (2.44 to 4.83) at P = 4 and
 4.46 (2.66 to 5.52) at P = 14; stash 1.02 at each P, its tick.
 
-LATENESS_CAUSE
+The lateness is the owner's longest loop iteration, not a tick: one `expire` that files and fires
+a backlog of 0.3 to 0.9 million entries at about 9 ns each (4 to 5 ms), after the producers have
+finished (`max_late_idle_ms` carries it; `max_late_pushing_ms` is 0 to 1.8 ms at P = 4 and 14).
+A burst of arms at about 290 million a second (P = 4) outruns the owner's filing at about 110
+million a second, so the inbox holds a backlog that drains in one pass. It is inherent to
+handing over through an inbox, so it is documented, not fixed. The same run with the producers
+paced to stash's rate (100 to 300 ns an arm) has no backlog: the worst fire is 0.21 ms at P = 1
+and 4, and 0.2 to 0.9 ms at P = 14 (job 261112-160910-a7d660, 30 rounds, medians; unpaced
+P = 1 0.21 ms, P = 4 3.48 ms, P = 14 4.08 ms). Stash, which pays for each arm on the producer
+at 150 to 300 ns, has no such backlog: its 1.02 ms is its tick, so for a burst faster than
+about 110 million arms a second stash fires late less.
 
 ### Sparse wakes
 
-SPARSE_WAKES
+One wake of an event loop that sleeps until `next()` and jumps far ahead (24 h horizon, 1,000,000
+entries, about one entry a wake) walked up to 4,096 empty slots bit by bit; `expire` now walks the
+occupied slots by bitmap word, at most 65 words a wake (`wheel_test sparse` counts them). Paired
+against the old walk in one build, exclusive, 24 rounds (job 261112-160906-c85f23): 201.6 ns a
+wake (177.5 to 231.8) against 264.4 ns (234.4 to 289.3), a ratio of 0.773 (0.724 to 0.801),
+outside the A/A band of 3.1%. The dense one-thread row did not move (job 261112-160908-f37dd5, 40
+rounds: score 0.988, 0.940 to 1.039, inside its 3.4% band). A wake still costs about 200 ns where
+an entry a millisecond apart costs nothing extra; the small-N row where Detent measured stash
+ahead was not rerun against stash here.
 
 ### Fire-and-forget keys over 24 hours
 

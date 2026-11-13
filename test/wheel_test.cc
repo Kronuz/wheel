@@ -71,8 +71,8 @@ constexpr u64 day = 86'400'000 * ms;
 
 void reentry() {
 	for (const std::string_view mode : {"cancel", "rearm", "self", "arm-due", "destroy"}) {
-		timer_wheel w(0);
 		timer_entry a, c;
+		timer_wheel w(0);
 		auto* owned = new timer_entry;  // b, which destroys itself in "destroy"
 		timer_entry& b = *owned;
 		w.arm(a, 500'000);  // both due in slot 0; b is the list head, a follows
@@ -186,8 +186,8 @@ void far_deadlines() {
 	// Beyond any level: across jumps of days to millennia nothing fires early, and from 63 days
 	// before `never` each daily expire fires exactly the one entry it reaches.
 	{
-		timer_wheel w(0);
 		std::vector<timer_entry> es(64);
+		timer_wheel w(0);
 		for (std::size_t i = 0; i < es.size(); ++i) { w.arm(es[i], timer_wheel::never - i * day); }
 		std::size_t fired = 0;
 		auto count = [&](timer_entry& e) {
@@ -276,8 +276,8 @@ void cross() {
 // still in the stripe, losing A's).
 void shared() {
 	for (const std::string_view mode : {"cancel", "arm"}) {
-		timer_wheel w(0);
 		timer_entry a, b, c;
+		timer_wheel w(0);
 		hook::hold = true;
 		hook::parked = false;
 		std::thread producer_a([&] {
@@ -445,8 +445,8 @@ bool aborts_off_owner(Op op) {
 	std::fflush(stdout);
 	const pid_t pid = fork();
 	if (pid == 0) {
-		timer_wheel w(0);
 		timer_entry e;
+		timer_wheel w(0);
 		w.arm(e, 5 * ms);
 		std::thread([&] { op(w, e); }).join();
 		std::_Exit(0);
@@ -462,8 +462,8 @@ bool dying_expire_aborts() {
 	const pid_t pid = fork();
 	if (pid == 0) {
 		{
+			timer_entry e, f;  // outlive the wheel: its destructor fires them
 			timer_wheel w(0);
-			timer_entry e, f;
 			e.fire = &expire_on_drop;
 			f.fire = [](timer_entry&, bool) noexcept {};
 			dying = &w;
@@ -486,8 +486,8 @@ void owner() {
 		(void)e;
 	}));
 	{
-		timer_wheel w(0);
 		timer_entry e;
+		timer_wheel w(0);
 		w.arm(e, 5 * ms);
 		w.release();
 		std::thread([&] {

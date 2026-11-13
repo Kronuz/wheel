@@ -11,8 +11,8 @@ wheel.hh                 The whole library: timer_entry, timer_wheel.
 test/model.hh            The reference model: the wheel beside a map of deadlines, driven by
                          one source of choices, checked after every expire and at destruction.
 test/wheel_test.cc       reentry, model (random), far, cross (1, 4, 14 threads), shared, scan,
-                         sparse (a timing bound), drop, owner.
-test/summary_gate_test.py  wheel_bench_summary.py --gate on synthetic logs (run it directly).
+                         sparse (words a wake visits), drop, owner.
+test/summary_gate_test.py  wheel_bench_summary.py --gate on synthetic logs (CTest wheel_summary_gate).
 test/wheel_alloc_test.cc A counting operator new: no allocation per operation.
 fuzz/fuzz_ops.cc         libFuzzer: the model driven by the input bytes.
 fuzz/replay.cc           Replays fuzz/corpus/ (inputs the fuzzer found) under every compiler.
@@ -22,7 +22,7 @@ bench/                   The benchmark harness: wheel_bench.sh runs the rows (an
                          ratios and A/A bands; disasm.sh shows arm and cancel inlined.
 docs/timer-wheel.md      Shape, contracts, far deadlines, cost.
 CMakeLists.txt           INTERFACE target `wheel` (+ alias wheel::wheel), C++20; CTest tests
-                         wheel, wheel_alloc, wheel_fuzz_corpus, wheel_demo; -DWHEEL_FUZZ=ON
+                         wheel, wheel_alloc, wheel_summary_gate, wheel_fuzz_corpus, wheel_demo; -DWHEEL_FUZZ=ON
                          for wheel_fuzz.
 ```
 

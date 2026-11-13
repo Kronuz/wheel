@@ -95,21 +95,30 @@ Not for:
 
 ## ⚡ Performance
 
-On macOS x86_64 (i9-9980HK, Apple clang 17, `-O2`), against Detent's owner-only prototype
-wheel (R = 10, exclusive; the full tables and job ids are in
-[docs/timer-wheel.md](docs/timer-wheel.md#cost-a1)):
+On macOS x86_64 (i9-9980HK, Apple clang 17, `-O2 -DNDEBUG`), as medians over interleaved rounds,
+each run in its own process, against [stash](https://github.com/Kronuz/stash) where the two do the
+same work (the full tables, jobs and what is not the same work are in
+[docs/timer-wheel.md](docs/timer-wheel.md#cost)):
 
-| Single loop, ns per entry (arm + re-arm + cancel + expire) | prototype | wheel | ratio |
+| Per entry, ns | n | arm | whole life (arm, re-arm, cancel, arm, expire) |
 |---|---|---|---|
-| n = 1,000, harness wrappers inlined | 42.14 | 44.22 | 1.049x |
-| n = 1,000,000, harness wrappers inlined | 349.24 | 322.67 | 0.924x |
-| n = 1,000, default build | 38.30 | 41.84 | 1.092x |
-| n = 1,000,000, default build | 325.41 | 378.06 | 1.162x |
+| wheel | 1,000 | 6.2 | 42.0 |
+| stash | 1,000 | 134.2 | 1,110.4 |
+| wheel | 1,000,000 | 140.9 | 407.1 |
+| stash | 1,000,000 | 179.9 | 1,230.5 |
 
-Arm, re-arm and cancel match the prototype once inlined; expire costs 1-4 ns more per entry at
-n = 1,000. In the default build, clang leaves the harness's one-line wrapper around `arm` out of
-line, and that call is the remaining gap. Arms from 1, 4 and 14 threads cost 11-33 ns each, the
-same as the prototype with an inbox.
+| Arm from another thread, ns | P = 1 | P = 4 | P = 14 |
+|---|---|---|---|
+| wheel (`arm_remote`) | 14.8 | 12.1 | 31.8 |
+| stash | 148.2 | 198.9 | 306.6 |
+
+An armed entry costs 32 bytes and no heap (stash: 244 heap bytes per entry at 1,000 entries, 27.5
+at 1,000,000); the wheel's own block is 65,552 bytes, allocated once at construction. A cancel is
+a real unlink (3.7 ns at 1,000 entries, 28.8 ns at 1,000,000) where stash clears a flag and pays
+for the stale filing in `expire`, so the whole-life row is the one to compare. Costs to know: a
+burst of arms faster than the owner can file them delays the fires due inside it by the time the
+owner needs to drain it, and an event loop that sleeps until `next()` pays the bitmap words it
+crosses (the cross-thread lateness and sparse-wake rows in the docs have the numbers).
 
 ## License
 

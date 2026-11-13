@@ -2,9 +2,8 @@
 
 The one timer wheel of the Kronuz libraries (Detent PLAN.md D70, D72): a single-owner
 hierarchical wheel with a 64-stripe intrusive inbox for arms from other threads, 32-byte
-intrusive entries and no allocation per arm. It is candidate (f) of Detent's
-`docs/design/wheel-evidence.md` with upper levels for far deadlines; Kronuz/task, Kronuz/logger
-and Xapiand run their timers on it.
+intrusive entries and no allocation per arm. Kronuz/task, Kronuz/logger and Xapiand run their
+timers on it.
 
 ## Shape
 
@@ -76,64 +75,102 @@ so every deadline up to `never` has a slot of its own and none aliases one the c
    instruction and its caller wakes the owner. Only shared stripes (past 64 threads) see this
    delay; the owner's arm and cancel of the entry are exact regardless (`wheel_test shared`).
 
-## Cost (A1)
+## Cost
 
-Measured with `bench/wheel_bench.sh` (Detent's wheel-evidence harness), exclusive jobs on
-macOS x86_64 (i9-9980HK, Apple clang 17, `-O2`), at wheel:1cd7e7a. Each cell is the median of
-R runs, in ns per operation. Candidate (a) is the owner-only prototype, (f) is (a) with the
-inbox, and (w) is this library. The A/A band is how far apart two identical runs of (a) land.
+Detent's wheel-vs-stash comparison (`docs/perf/wheel-vs-stash.md` in Kronuz/Detent) ran this
+library (wheel:bfd72bc) and Kronuz/stash (stash:b7d8876) in one build on macOS x86_64 (i9-9980HK,
+Apple clang 17, `-O2 -DNDEBUG`). Every cell is a median over interleaved rounds, each arm in its
+own process, from `exclusive` jobs; every timing run delivered each entry once and none early. A
+row says whether the two do the same work ("same work"); stash's number appears only where they
+do, or beside a row the text calls out. A ratio is a median of per-round ratios with an interval
+from order statistics, and holds only when it lies outside the A/A band of stash against itself.
 
-The harness calls each candidate through a one-line wrapper (`cand_x::arm`). Detent decision D75
-gates A1 on the build that forces those wrappers inline for every candidate alike
-(`WHEEL_BENCH_CXXFLAGS=-DWHEEL_BENCH_FORWARD=[[gnu::always_inline]]`), and reports the default
-build next to it.
+### One thread: arm, re-arm, cancel, expire
 
-**Single loop, wrappers inlined (the A1 row), R = 10, job 261111-234624-f5cc8e:**
+One repetition arms every entry, re-arms it, cancels it, arms it again, then expires in 1 ms
+steps until all fired, each pass in one random order. ns per entry operation, manual clock.
 
-| n | | arm | re-arm | cancel | expire | score | w / a | A/A |
-|---|---|---|---|---|---|---|---|---|
-| 1,000 | a | 5.31 | 11.79 | 4.98 | 20.04 | 42.14 | | 23.7% |
-| 1,000 | w | 5.07 | 10.41 | 4.73 | 24.02 | 44.22 | 1.049x | |
-| 1,000,000 | a | 106.97 | 106.48 | 30.75 | 106.30 | 349.24 | | 21.1% |
-| 1,000,000 | w | 101.97 | 96.73 | 28.17 | 97.91 | 322.67 | 0.924x | |
+| n | operation | wheel | stash | same work |
+|---|---|---|---|---|
+| 1,000 | arm | 6.22 | 134.23 | yes |
+| 1,000 | re-arm | 8.86 | | no |
+| 1,000 | cancel | 3.69 | 0.66 | no |
+| 1,000 | expire | 23.19 | | no |
+| 1,000 | whole life (the four, summed) | 42.00 | 1,110.37 | yes |
+| 1,000,000 | arm | 140.93 | 179.94 | yes |
+| 1,000,000 | re-arm | 127.31 | | no |
+| 1,000,000 | cancel | 28.77 | 5.89 | no |
+| 1,000,000 | expire | 107.26 | | no |
+| 1,000,000 | whole life | 407.14 | 1,230.51 | yes |
 
-**Single loop, default build, R = 10, job 261111-233420-9245bb:**
+- **Whole life is the row to quote.** Stash's re-arm files the entry again and leaves the first
+  filing stale, its cancel clears a flag in the entry, and its `expire` pays for every stale
+  filing it walks; the wheel moves, unlinks and fires only live entries. The wheel's cancel is a
+  real unlink, 3.7 ns against 0.66 ns at 1,000 entries and 28.8 ns against 5.9 ns at 1,000,000,
+  where stash defers the work to `expire`.
+- At 1,000 entries everything is in cache and an arm is 6 to 9 ns; at 1,000,000 both are bound by
+  cache misses on entries in random order.
 
-| n | | arm | re-arm | cancel | expire | score | w / a | A/A |
-|---|---|---|---|---|---|---|---|---|
-| 1,000 | a | 5.02 | 7.93 | 4.97 | 20.34 | 38.30 | | 10.5% |
-| 1,000 | w | 5.69 | 8.46 | 5.00 | 22.70 | 41.84 | 1.092x | |
-| 1,000,000 | a | 102.77 | 101.39 | 29.42 | 98.89 | 325.41 | | 26.9% |
-| 1,000,000 | w | 133.55 | 117.89 | 28.38 | 98.94 | 378.06 | 1.162x | |
+### Arm from another thread
 
-**Cross-thread, R = 5, P producers arming 1,000,000 entries, producer ns per arm.** Every run
-fired each entry once, none early (valid).
+P producer threads arm 1,000,000 entries at now plus 1 to 1,000 ms (`arm_remote` for the wheel)
+while one owner fires them; ns per arm on the producer, same work.
 
-| P | f | w | w / f | A/A | job |
-|---|---|---|---|---|---|
-| 1 | 11.24 | 12.65 | 1.125x | 35.1% | 261111-233422-3a6c0b |
-| 4 | 11.32 | 11.11 | 0.981x | 15.4% | 261111-233422-3a6c0b |
-| 14 | 31.99 | 32.62 | 1.020x | 17.4% | 261111-233422-3a6c0b |
-| 1 | 12.48 | 12.55 | 1.006x | 24.2% | 261111-221548-4b10b6 (wheel:94a51c6) |
-| 4 | 11.30 | 11.69 | 1.035x | 23.6% | 261111-221548-4b10b6 |
-| 14 | 34.49 | 32.32 | 0.937x | 38.1% | 261111-221548-4b10b6 |
+| P | wheel | stash |
+|---|---|---|
+| 1 | 14.77 | 148.20 |
+| 4 | 12.12 | 198.91 |
+| 14 | 31.76 | 306.60 |
 
-wheel:94a51c6 and wheel:1cd7e7a run the same `arm_remote`, `drain` and `expire`; only the
-owner's `arm` differs between them.
+The row is the producer's cost; the owner's cost of filing what the inbox holds is not in it.
 
-**What each feature (a) lacks costs:**
+### Fire lateness of a cross-thread burst
 
-- **The inbox test and the far-deadline branch in `arm`:** nothing measurable once inlined. With
-  the wrappers inlined, w's arm, re-arm and cancel sit at or below (a)'s (5.07 vs 5.31 ns at
-  n = 1,000).
-- **Their code size:** clang's inline cost for the harness's `cand_w::arm` is 285. For
-  `cand_a::arm` it is 205, and the threshold at `-O2` is 225 (job 261111-233446-2a29ab). So in
-  the default build, w's wrapper stays a call. That call costs arm +0.67 ns and re-arm +0.53 ns
-  at n = 1,000, and arm +31 ns and re-arm +16 ns at n = 1,000,000; this is the whole default-build
-  gap. The cost is the inbox test, the far branch and `arm`'s one call to `arm_slow`. A caller
-  that calls `timer_wheel::arm` directly inlines it, since `arm` is always inlined.
-- **expire's residue:** +1.2 to +4.3 ns per entry at n = 1,000 across the probes (+3.98 in the
-  A1 row). It disappears at n = 1,000,000 (97.91 vs 106.30). Per call, `expire` does work (a)
-  doesn't: it tests `queued()` and whether the cursor crossed into an upper slot. Neither has been
-  shown to be the cause, which is untraced.
-- **Cross-thread arm:** the same CAS as (f); within the A/A band at every P.
+The worst fire after its deadline in that run, median over rounds (the minimum to the maximum
+over 40 rounds), in ms: the wheel 0.20 (0.14 to 0.94) at P = 1, 3.42 (2.44 to 4.83) at P = 4 and
+4.46 (2.66 to 5.52) at P = 14; stash 1.02 at each P, its tick.
+
+LATENESS_CAUSE
+
+### Sparse wakes
+
+SPARSE_WAKES
+
+### Fire-and-forget keys over 24 hours
+
+P producers file N keys uniformly over a 24 h horizon (no cancel, no re-arm), then one consumer
+drains them in key order, on a manual clock. Insert is the producer's median ns per key, same work.
+
+| N | P | wheel insert | stash insert |
+|---|---|---|---|
+| 1,000,000 | 1 | 10.4 | 746.3 |
+| 1,000,000 | 4 | 10.0 | 859.9 |
+| 1,000,000 | 14 | 33.4 | 1,811.3 |
+| 1,000 | 1 | 12.9 | 660.8 |
+| 1,000 | 4 | 29.3 | 1,200.8 |
+| 1,000 | 14 | 174.6 | 7,221.5 |
+
+The wheel's consumer does what an event loop does (expire, sleep until `next()`, expire again),
+and stash's drains with one walk to the horizon's end, so their drain times are not the same work.
+Insert plus drain per key at 1,000,000 keys: the wheel 211 to 239 ns, stash 2,237 to 3,315 ns.
+
+### Memory
+
+| Row | wheel | stash | same work |
+|---|---|---|---|
+| entry, bytes | 32 | 16 | no: the entry types differ |
+| bytes per entry at n = 1,000 (entry and heap) | 97.55 | 269.25 | yes |
+| bytes per entry at n = 1,000,000 | 32.07 | 43.53 | yes |
+| heap per armed entry, n = 1,000 | 0 | 244.00 | yes |
+| heap per armed entry, n = 1,000,000 | 0 | 27.52 | yes |
+| 24 h keys, N = 1,000,000: bytes per key | 32.07 | 382.21 | yes |
+| structure after construction | 65,552 | 9,248 | yes |
+
+The wheel allocates its 65,552 bytes at construction and nothing per entry; a process with a
+handful of timers pays that block. Stash grows as entries arrive.
+
+### Reproducing
+
+`bench/wheel_bench.sh single|cross|late|ab` (and `AB_ROW=wake` for `ab`) run the library's own
+rows; the paired statistics are `bench/wheel_bench_summary.py`'s (a ratio is taken inside a
+round). The comparison with stash is Detent's `docs/design/async-drivers-bench`.

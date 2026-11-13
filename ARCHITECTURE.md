@@ -17,10 +17,11 @@ No compiled translation unit, no dependency beyond the standard library (`<algor
 
 ## Why one owner
 
-Detent's `docs/design/wheel-evidence.md` measured six candidates on one loop and from 1 to 14
-producer threads. A wheel every thread may touch (Kronuz/stash) pays for that on every
-operation: 3.5x to 27x slower on the loop, most of it in `expire`. A single-owner wheel touches
-no atomic on the loop path; the only shared state is the inbox, and only remote arms write it.
+A wheel every thread may touch (Kronuz/stash) pays for that on every operation: an arm from
+another thread costs it 148 to 307 ns from 1 to 14 threads where `arm_remote` costs 12 to 32 ns,
+and the whole life of a timer 1,110 ns where the wheel's is 42 ns at 1,000 entries (the cost
+tables in `docs/timer-wheel.md`). A single-owner wheel touches no atomic on the loop path; the
+only shared state is the inbox, and only remote arms write it.
 Only the owner cancels or re-arms because those need the entry's slot, which only the owner's
 thread may change; a cross-thread cancel is a flag the fire checks, or a post to the owner.
 
@@ -36,7 +37,7 @@ the upper levels', is in one array, so one range check covers all of them.
 
 An unarmed entry's `next` is unused, so a remote arm pushes the entry itself onto a lock-free
 stack: no node, no allocation, and the entry stays 32 bytes. One stack head is one contended
-cache line (from four producers on, (e) of the evidence lost to stash); 64 stripes, a cache line
+cache line from four producers on; 64 stripes, a cache line
 each, picked per thread on first use, keep producers apart, and one word of stripe bits lets the
 owner skip empty stripes, so an idle inbox costs `expire` one relaxed load. The owner files a
 drained entry with `file()`, never `arm()`: `arm()` of an unarmed entry drains again, and
@@ -44,8 +45,8 @@ producers refilling the inbox would nest drains without bound.
 
 ## Why levels, and why they cascade on entry
 
-Level 0 is a round of 4,096 x 1 ms: a deadline within it is one slot, and `expire` walks only the
-slots it passes. A deadline farther away goes in the lowest upper level whose 64 slots reach it.
+Level 0 is a round of 4,096 x 1 ms: a deadline within it is one slot, and `expire` visits only the
+occupied slots it passes, found by their bitmap words. A deadline farther away goes in the lowest upper level whose 64 slots reach it.
 When the cursor enters an upper slot's span, its entries are filed again relative to the new
 cursor and land at least a level lower; each entry moves at most once per level. The alternative,
 keeping far entries in level 0 and skipping them each round, makes a tick walk entries that are

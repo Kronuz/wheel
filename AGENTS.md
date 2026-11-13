@@ -10,13 +10,14 @@ and test, the invariants you must not break, and the traps that are easy to fall
 wheel.hh                 The whole library: timer_entry, timer_wheel.
 test/model.hh            The reference model: the wheel beside a map of deadlines, driven by
                          one source of choices, checked after every expire and at destruction.
-test/wheel_test.cc       reentry, model (random), far, cross (1, 4, 14 threads), drop, owner.
+test/wheel_test.cc       reentry, model (random), far, cross (1, 4, 14 threads), shared, scan,
+                         sparse (a timing bound), drop, owner.
+test/summary_gate_test.py  wheel_bench_summary.py --gate on synthetic logs (run it directly).
 test/wheel_alloc_test.cc A counting operator new: no allocation per operation.
 fuzz/fuzz_ops.cc         libFuzzer: the model driven by the input bytes.
 fuzz/replay.cc           Replays fuzz/corpus/ (inputs the fuzzer found) under every compiler.
 examples/demo.cc         A runnable tour (also a CTest).
-bench/                   Detent's wheel-evidence harness: the prototype (a), (f) and this
-                         library (w); wheel_bench.sh runs the rows (and an A/B of two
+bench/                   The benchmark harness: wheel_bench.sh runs the rows (and an A/B of two
                          trees' wheel.hh), wheel_bench_summary.py prints medians, paired
                          ratios and A/A bands; disasm.sh shows arm and cancel inlined.
 docs/timer-wheel.md      Shape, contracts, far deadlines, cost.
@@ -64,8 +65,8 @@ statistics; the A/A band is the twin's interval, not the runs' min-max, which on
   only the inbox. Don't let another thread read `pprev` or `next` of an entry it handed over.
 - **drain() files with `file()`, not `arm()`:** an `arm()` of an unarmed entry drains, so producers
   refilling the inbox would nest drains without bound.
-- **arm and cancel inline; drain and the upper-level filing do not.** A call per operation was
-  the whole macOS gap to the prototype (1.36-1.50x at n = 1,000): clang left arm, cancel and file
+- **arm and cancel inline; drain and the upper-level filing do not.** A call per operation cost
+  36-50% at n = 1,000 on macOS: clang left arm, cancel and file
   out of line while drain's loop sat inside them. arm files a level-0 deadline itself and has one
   call, `arm_slow`, for a far deadline or an inbox to file first. Keep the hot paths free of loops;
   check with `nm -C` on the bench build that no `timer_wheel::arm`, `cancel` or `file` symbol is

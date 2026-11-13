@@ -13,7 +13,7 @@ All notable changes to `wheel` are recorded here, newest first. The format follo
 - Tests: a reference model (`test/model.hh`) run from a generator and from a libFuzzer target
   (`fuzz/fuzz_ops.cc`), far deadlines up to `never`, arms from 1, 4 and 14 threads, the owner
   assertions, a counting-allocator test.
-- `bench/`: Detent's wheel-evidence harness with the library beside the prototype and (f).
+- `bench/`: the benchmark harness (single loop, sparse wakes, cross-thread arms and lateness).
 - `fuzz/corpus/` and `wheel_fuzz_replay`, which replays it under every compiler.
 - `examples/demo.cc`, `docs/timer-wheel.md`.
 

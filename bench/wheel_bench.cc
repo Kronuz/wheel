@@ -162,6 +162,7 @@ struct cand_w {
 	void arm_from(entry& e, u64 d) { w->arm_remote(e, d); }
 	template <class F>
 	std::size_t expire(u64 now, F&& f) { return w->expire(now, [&](wheel::timer_entry& e) { f(e); }); }
+	std::size_t filed() const { return w->size(); }
 };
 
 template <class F>
@@ -229,16 +230,73 @@ void single(std::string_view arm, std::size_t n) {
 	std::printf("end=%s\n", utc().c_str());
 }
 
+// ---- sparse wakes -------------------------------------------------------------------------
+// N entries uniform over a 24 h horizon, armed by the owner; then the loop an event loop runs:
+// expire, sleep until next(), expire again, until empty, on a manual clock. Each repetition fills
+// the wheel (untimed) and times the wakes; at least 1,000,000 / N repetitions and 100 ms of wakes.
+// A wake lands on an occupied slot's end or an upper slot's start, far from the last one at
+// small N, so what a wake costs there is the cost of crossing empty time.
+void wake(std::string_view arm, std::size_t n) {
+	constexpr u64 horizon_ms = 86'400'000, min_timed_ns = 100 * ms;
+	const std::size_t min_reps = std::max<std::size_t>(1, 1'000'000 / n);
+	std::mt19937_64 random(n * 31 + horizon_ms);
+	std::vector<u64> offsets(n);
+	for (auto& o : offsets) { o = 1 * ms + random() % ((horizon_ms - 1) * ms); }
+	std::vector<wheel::timer_entry> entries(n);
+	std::vector<std::uint32_t> fires(n);
+	std::size_t delivered = 0, early = 0, twice = 0;
+	for (auto& e : entries) {
+		e.fire = [](wheel::timer_entry&, bool) noexcept {};
+	}
+	std::printf("config row=wake arm=%.*s n=%zu horizon_ms=%llu min_reps=%zu clock=manual base_ns=%llu\n", int(arm.size()), arm.data(), n,
+		static_cast<unsigned long long>(horizon_ms), min_reps, static_cast<unsigned long long>(manual_base));
+	std::printf("start=%s\n", utc().c_str());
+	const double ghz0 = core_ghz();
+	const u64 started = now_ns();
+	u64 timed = 0;
+	std::size_t reps = 0, wakes = 0, empty = 0;
+	for (; reps < min_reps || timed < min_timed_ns; ++reps) {
+		auto w = std::make_unique<wheel::timer_wheel>(manual_base);
+		for (std::size_t i = 0; i < n; ++i) { w->arm(entries[i], manual_base + offsets[i]); }
+		std::fill(fires.begin(), fires.end(), 0);
+		u64 t = manual_base;
+		const u64 t0 = now_ns();
+		for (;;) {
+			const std::size_t fired = w->expire(t, [&](wheel::timer_entry& e) {
+				early += e.deadline > t;
+				twice += fires[static_cast<std::size_t>(&e - entries.data())]++;
+			});
+			delivered += fired;
+			++wakes;
+			empty += fired == 0;
+			t = w->next();
+			if (t == wheel::timer_wheel::never) { break; }
+		}
+		timed += now_ns() - t0;
+	}
+	std::printf("timed_s=%.3f\n", (now_ns() - started) / 1e9);
+	const double ghz1 = core_ghz();
+	std::printf("row=wake arm=%.*s n=%zu reps=%zu wake_ns=%.2f drain_ns=%.2f wakes=%zu empty_wakes=%zu delivered=%zu early=%zu twice=%zu ghz0=%.2f ghz1=%.2f\n",
+		int(arm.size()), arm.data(), n, reps, static_cast<double>(timed) / static_cast<double>(wakes), static_cast<double>(timed) / static_cast<double>(n * reps),
+		wakes / reps, empty / reps, delivered, early, twice, ghz0, ghz1);
+	std::printf("end=%s\n", utc().c_str());
+	CHECK(delivered == n * reps && early == 0 && twice == 0);
+}
+
 // ---- cross-thread -------------------------------------------------------------------------
 // P producers each arm TOTAL / P distinct entries once, at steady_clock now (read every 64 arms)
 // plus uniform [1, window] ms; the owner spins on steady_clock, firing until every entry fired.
 struct cross_result {
 	double producer_ns = 0, producer_cpu_ns = 0, producer_min_ns = 0, producer_max_ns = 0;
 	double span_ms = 0, last_after_deadline_ms = 0, max_late_ms = 0;
+	// The worst fire while producers still push and after the last one is done, the longest
+	// owner loop iteration (an expire call, the drain in it), and when the producers were done.
+	double max_late_pushing_ms = 0, max_late_idle_ms = 0, max_gap_ms = 0, push_ms = 0;
+	std::size_t max_gap_filed = 0;  // entries the longest iteration's expire filed from the inbox (w only)
 	std::size_t fired = 0, early = 0, twice = 0, missing = 0;
 };
 template <class C>
-cross_result cross_run(std::size_t producers, std::size_t total, u64 window_ms) {
+cross_result cross_run(std::size_t producers, std::size_t total, u64 window_ms, u64 pace_ns = 0) {
 	const std::size_t per = total / producers;
 	total = per * producers;
 	std::vector<typename C::entry> entries(total);
@@ -249,6 +307,8 @@ cross_result cross_run(std::size_t producers, std::size_t total, u64 window_ms) 
 	C c(now_ns());
 	std::atomic<std::size_t> ready{0};
 	std::atomic<bool> go{false};
+	std::atomic<std::size_t> finished{0};
+	std::atomic<u64> finished_at{0};
 	std::vector<u64> elapsed(producers), on_cpu(producers);
 	std::vector<std::thread> threads;
 	for (std::size_t p = 0; p < producers; ++p) {
@@ -261,26 +321,42 @@ cross_result cross_run(std::size_t producers, std::size_t total, u64 window_ms) 
 				if ((k & 63) == 0) { now = now_ns(); }
 				const std::size_t i = p * per + k;
 				c.arm_from(entries[i], now + offsets[i]);
+				if (pace_ns) { while (now_ns() < t0 + (k + 1) * pace_ns) {} }
 			}
 			elapsed[p] = now_ns() - t0;
 			on_cpu[p] = thread_cpu_ns() - c0;
+			if (finished.fetch_add(1) + 1 == producers) { finished_at.store(now_ns()); }
 		});
 	}
 	while (ready.load() != producers) {}
 	cross_result out;
-	u64 last_deadline = 0, last_fire = 0, max_late = 0;
+	u64 last_deadline = 0, last_fire = 0, max_late = 0, late_pushing = 0, late_idle = 0, max_gap = 0;
 	const u64 start = now_ns();
+	u64 previous = start;
+	std::size_t filed_in_call = 0;
 	go.store(true, std::memory_order_release);
 	while (out.fired < total) {
 		const u64 now = now_ns();
+		if (now - previous > max_gap) {
+			max_gap = now - previous;
+			out.max_gap_filed = filed_in_call;
+		}
+		previous = now;
+		const bool pushing = finished.load(std::memory_order_relaxed) != producers;
+		const std::size_t before = out.fired;
+		std::size_t held = 0;
+		if constexpr (requires { c.filed(); }) { held = c.filed(); }
 		out.fired += c.expire(now, [&](typename C::entry& e) {
 			const u64 d = C::deadline(e);
 			if (d > now) { ++out.early; }
-			max_late = std::max(max_late, now - std::min(now, d));
+			const u64 late = now - std::min(now, d);
+			max_late = std::max(max_late, late);
+			(pushing ? late_pushing : late_idle) = std::max(pushing ? late_pushing : late_idle, late);
 			last_deadline = std::max(last_deadline, d);
 			++fires[static_cast<std::size_t>(&e - entries.data())];
 		});
 		last_fire = now;
+		if constexpr (requires { c.filed(); }) { filed_in_call = c.filed() + (out.fired - before) - held; }
 		if (now - start > 60'000 * ms) { break; }  // a lost entry: report it rather than hang
 	}
 	for (auto& t : threads) { t.join(); }
@@ -297,6 +373,10 @@ cross_result cross_run(std::size_t producers, std::size_t total, u64 window_ms) 
 	out.span_ms = (last_fire - start) / 1e6;
 	out.last_after_deadline_ms = (last_fire > last_deadline ? last_fire - last_deadline : 0) / 1e6;
 	out.max_late_ms = max_late / 1e6;
+	out.max_late_pushing_ms = late_pushing / 1e6;
+	out.max_late_idle_ms = late_idle / 1e6;
+	out.max_gap_ms = max_gap / 1e6;
+	out.push_ms = (finished_at.load() - start) / 1e6;
 	return out;
 }
 template <class C>
@@ -310,12 +390,15 @@ void cross(std::string_view arm, std::size_t producers, std::size_t total) {
 		std::printf("start=%s\n", utc().c_str());
 		const double ghz0 = core_ghz();
 		const u64 started = now_ns();
-		const auto r = cross_run<C>(producers, total, 1'000);
+		// WHEEL_BENCH_PACE_NS: each producer waits out this many ns per arm (the cross row's pad).
+		const char* pace = std::getenv("WHEEL_BENCH_PACE_NS");
+		const u64 pace_ns = pace ? std::strtoull(pace, nullptr, 10) : 0;
+		const auto r = cross_run<C>(producers, total, 1'000, pace_ns);
 		std::printf("timed_s=%.3f\n", (now_ns() - started) / 1e9);
 		const double ghz1 = core_ghz();
 		const bool valid = r.early == 0 && r.twice == 0 && r.missing == 0 && r.last_after_deadline_ms <= 100.0;
-		std::printf("row=cross arm=%.*s p=%zu producer_ns=%.2f producer_cpu_ns=%.2f producer_min_ns=%.2f producer_max_ns=%.2f span_ms=%.1f last_after_deadline_ms=%.2f max_late_ms=%.2f fired=%zu early=%zu twice=%zu missing=%zu valid=%d ghz0=%.2f ghz1=%.2f\n",
-			int(arm.size()), arm.data(), producers, r.producer_ns, r.producer_cpu_ns, r.producer_min_ns, r.producer_max_ns, r.span_ms, r.last_after_deadline_ms, r.max_late_ms, r.fired, r.early, r.twice, r.missing, int(valid), ghz0, ghz1);
+		std::printf("row=cross arm=%.*s p=%zu pad=%llu producer_ns=%.2f producer_cpu_ns=%.2f producer_min_ns=%.2f producer_max_ns=%.2f span_ms=%.1f last_after_deadline_ms=%.2f max_late_ms=%.2f max_late_pushing_ms=%.2f max_late_idle_ms=%.2f max_gap_ms=%.2f max_gap_filed=%zu push_ms=%.1f fired=%zu early=%zu twice=%zu missing=%zu valid=%d ghz0=%.2f ghz1=%.2f\n",
+			int(arm.size()), arm.data(), producers, static_cast<unsigned long long>(pace_ns), r.producer_ns, r.producer_cpu_ns, r.producer_min_ns, r.producer_max_ns, r.span_ms, r.last_after_deadline_ms, r.max_late_ms, r.max_late_pushing_ms, r.max_late_idle_ms, r.max_gap_ms, r.max_gap_filed, r.push_ms, r.fired, r.early, r.twice, r.missing, int(valid), ghz0, ghz1);
 		std::printf("end=%s\n", utc().c_str());
 		CHECK(r.early == 0 && r.twice == 0 && r.missing == 0);
 	}
@@ -325,13 +408,15 @@ void cross(std::string_view arm, std::size_t producers, std::size_t total) {
 int main(int argc, char** argv) {
 	std::setvbuf(stdout, nullptr, _IOLBF, 0);
 	if (argc < 4) {
-		std::fprintf(stderr, "usage: %s single ARM N | cross ARM P TOTAL\n", argv[0]);
+		std::fprintf(stderr, "usage: %s single ARM N | wake ARM N | cross ARM P TOTAL\n", argv[0]);
 		return 2;
 	}
 	const std::string_view mode = argv[1], arm = argv[2];
 	const std::size_t x = std::strtoull(argv[3], nullptr, 10);
 	if (mode == "single") {
 		dispatch(arm, [&](auto* tag) { single<std::remove_pointer_t<decltype(tag)>>(arm, x); });
+	} else if (mode == "wake") {
+		wake(arm, x);
 	} else if (mode == "cross") {
 		const std::size_t total = argc > 4 ? std::strtoull(argv[4], nullptr, 10) : 1'000'000;
 		dispatch(arm, [&](auto* tag) { cross<std::remove_pointer_t<decltype(tag)>>(arm, x, total); });

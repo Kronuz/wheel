@@ -25,20 +25,27 @@ from collections import defaultdict
 THRESHOLD = 1.10
 METRICS: dict[str, list[str]] = {
     "single": ["arm_ns", "rearm_ns", "cancel_ns", "expire_ns", "score"],
+    "wake": ["wake_ns", "drain_ns"],
     "cross": [
         "producer_ns",
         "producer_cpu_ns",
         "span_ms",
         "max_late_ms",
+        "max_late_pushing_ms",
+        "max_late_idle_ms",
+        "max_gap_ms",
+        "max_gap_filed",
+        "push_ms",
         "last_after_deadline_ms",
     ],
 }
 PAIRED: dict[str, list[str]] = {
     "single": ["score", "arm_ns", "rearm_ns", "cancel_ns", "expire_ns"],
+    "wake": ["wake_ns", "drain_ns"],
     "cross": ["producer_ns", "producer_cpu_ns"],
 }
-SIZE = {"single": "n", "cross": "p"}
-REF = {"single": ("a", "a2"), "cross": ("f", "f2")}
+SIZE = {"single": "n", "wake": "n", "cross": "p"}
+REF = {"single": ("a", "a2"), "wake": ("w", "w2"), "cross": ("f", "f2")}
 
 Key = tuple[str, int, int]
 Run = dict[str, str]

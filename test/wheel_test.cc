@@ -9,6 +9,9 @@
 //             each fires once, never early
 //   shared    two threads on one stripe, the first held between its push and its bit: the
 //             owner's cancel and arm of the second's entry are exact
+//   scan      expire from every cursor offset in its word and the ring, over every span: each due
+//             entry fires once, in slot order
+//   sparse    (optimized, no sanitizer) a wake that jumps over empty time costs under 1 us
 //   drop      a destroyed wheel runs fire(e, false) once for what is armed or queued; what such
 //             a fire arms is unlinked, unfired
 //   owner     (Debug) a cancel, a re-arm and an expire from another thread abort
@@ -34,6 +37,7 @@ inline void pushed(unsigned s, const void* first) {
 #include "model.hh"
 #include "wheel.hh"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -363,6 +367,89 @@ void drop() {
 	std::printf("drop a dying fire's arms are unlinked unfired ok\n");
 }
 
+// expire() walks the occupied slots of the ticks it crosses, by bitmap word: every due entry
+// fires once, in slot order, whatever the cursor's offset in its word and the ring, and how far it
+// jumps.
+std::vector<u64> fired_at;
+timer_entry fired_probe;
+void scan() {
+	constexpr std::size_t offsets[] = {0, 1, 63, 64, 65, 127, 128, 4031, 4032, 4094, 4095, 4096, 4097, 8191};
+	constexpr std::size_t spans[] = {0, 1, 2, 62, 63, 64, 65, 126, 127, 128, 129, 1000, 4094, 4095, 4096, 4097, 100'000};
+	std::size_t checked = 0;
+	for (const std::size_t at : offsets) {
+		for (const std::size_t span : spans) {
+			const u64 base = (at + 1'000'000) * ms;  // the cursor's tick
+			timer_wheel w(base);
+			std::vector<timer_entry> es(4100 + 3);
+			std::vector<u64> due;
+			for (std::size_t k = 0; k < es.size(); ++k) {
+				es[k].fire = [](timer_entry& e, bool) noexcept { fired_at.push_back(e.deadline); };
+				// one entry in every level-0 slot of the round, and a few beyond it
+				const u64 d = base + (k < 4096 ? k : 4096 + (k - 4096) * 1'000) * ms + (k % 3) * (ms / 4);
+				w.arm(es[k], d);
+				if (d <= base + span * ms) { due.push_back(d); }
+			}
+			std::sort(due.begin(), due.end());
+			fired_at.clear();
+			const std::size_t n = w.expire(base + span * ms, [](timer_entry& e) { fired_at.push_back(e.deadline); });
+			// in tick order within a round; past one, entries that cascaded down file in the cursor's slot
+			if (span >= 4096) { std::sort(fired_at.begin(), fired_at.end()); }
+			CHECK(n == due.size() && fired_at == due);
+			checked += n;
+			// what is left fires later, exactly once
+			const std::size_t left = w.expire(base + 8'000'000 * ms);
+			CHECK(n + left == es.size() && w.size() == 0);
+			fired_at.clear();
+		}
+	}
+	std::printf("scan offsets=%zu spans=%zu fired=%zu ok\n", std::size(offsets), std::size(spans), checked);
+}
+
+// A far jump costs the words it crosses, not the slots: 1,000 keys over 24 h woken at next() take
+// about 0.2 us a wake, against 2 us when each of the 4,096 slots was visited. Timing, so only an
+// optimized build without a sanitizer asserts it; the best of 30 runs filters a busy host.
+#if defined(NDEBUG) && !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_THREAD__)
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(undefined_behavior_sanitizer)
+#define WHEEL_TEST_NO_TIMING
+#endif
+#endif
+#else
+#define WHEEL_TEST_NO_TIMING
+#endif
+void sparse() {
+#ifdef WHEEL_TEST_NO_TIMING
+	std::printf("sparse skipped (debug or sanitizer build)\n");
+#else
+	constexpr std::size_t n = 1000;
+	std::vector<timer_entry> es(n);
+	std::mt19937_64 random(7);
+	std::vector<u64> at(n);
+	for (auto& d : at) { d = 1 * ms + random() % (86'400'000 * ms); }
+	double best = 1e18;
+	std::size_t wakes = 0;
+	for (int trial = 0; trial < 30; ++trial) {
+		timer_wheel w(0);
+		for (std::size_t i = 0; i < n; ++i) {
+			es[i].fire = [](timer_entry&, bool) noexcept {};
+			w.arm(es[i], at[i]);
+		}
+		wakes = 0;
+		std::size_t fired = 0;
+		const auto t0 = std::chrono::steady_clock::now();
+		for (u64 t = 0; t != timer_wheel::never; t = w.next()) {
+			fired += w.expire(t);
+			++wakes;
+		}
+		const auto ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count();
+		CHECK(fired == n && wakes > n);
+		best = std::min(best, ns / static_cast<double>(wakes));
+	}
+	std::printf("sparse wakes=%zu best %.0f ns a wake\n", wakes, best);
+	CHECK(best < 1000);
+#endif
+}
+
 #ifndef NDEBUG
 // Binds the wheel to this thread, then runs `op` on another; the child must die on SIGABRT.
 template <class Op>
@@ -434,6 +521,8 @@ int main(int argc, char** argv) {
 	if (only == "all" || only == "far") { far_deadlines(); }
 	if (only == "all" || only == "cross") { cross(); }
 	if (only == "all" || only == "shared") { shared(); }
+	if (only == "all" || only == "scan") { scan(); }
+	if (only == "all" || only == "sparse") { sparse(); }
 	if (only == "all" || only == "drop") { drop(); }
 #ifndef NDEBUG
 	if (only == "all" || only == "owner") { owner(); }

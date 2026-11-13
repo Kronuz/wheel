@@ -2,12 +2,17 @@
 # The wheel-evidence rows for wheel::timer_wheel (wheel_bench.cc):
 #   wheel_bench.sh single [R]   R interleaved rounds (default 40) of a a2 f w at n = 1e3 and 1e6
 #   wheel_bench.sh cross [R]    R interleaved rounds (default 40) of f f2 w at P = 1, 4 and 14
+#   wheel_bench.sh late [R]     R rounds (default 40) of the library alone at P = $PRODUCERS (default
+#                               1 4 14), each producer waiting $PACES ns per arm (default "0 100 200
+#                               300"; the row's pad): fire lateness against the arrival rate
 #   wheel_bench.sh pads         the placement probe: a and f at n = 1e3, 3 rounds, with
 #                               $PADS bytes between the wheel and the entries
 #   wheel_bench.sh ab OLD [R]   w and a against OLD's wheel.hh and this tree's, built alike: arms
 #                               w.old (twin w.old.2), w.new, a.old, a.new; R rounds (default 40) at
 #                               n = $N (default 1e3). $AB_VARIANTS ("tag=flags;...", default "=")
 #                               repeats them per extra flag set, the tag appended to each build.
+#                               $AB_ROW=wake runs the sparse-wakes row instead (w arms only, N
+#                               default 1e3).
 # Each round runs every arm once, in its own process, in a rotated order, and logs the host's
 # load and CPU speed limit. $CANDIDATES narrows the arms (a2 follows a, f2 follows f), $PRODUCERS
 # the cross row's P, and $WHEEL_BENCH_CXXFLAGS adds compiler flags to every arm.
@@ -33,7 +38,7 @@ run() { "$bin" "$@" | tee -a "$log"; }
 declare -A bins=()
 run_ab() {  # ARM N: ARM's build is the label after its dot, without a twin's .2
 	local tag=${1#*.}
-	"${bins[${tag%.2}]}" single "$1" "$2" | tee -a "$log"
+	"${bins[${tag%.2}]}" "${AB_ROW:-single}" "$1" "$2" | tee -a "$log"
 }
 round() {  # R: a round's header, with what else the host is doing
 	local limit
@@ -75,6 +80,17 @@ cross)
 		done
 	done
 	;;
+late)
+	rounds=${2:-40}
+	read -ra producers <<<"${PRODUCERS:-1 4 14}"
+	read -ra paces <<<"${PACES:-0 100 200 300}"
+	for ((r = 0; r < rounds; ++r)); do
+		round "$r"
+		for p in "${producers[@]}"; do
+			for pace in "${paces[@]}"; do WHEEL_BENCH_PACE_NS=$pace run cross w "$p" 1000000; done
+		done
+	done
+	;;
 pads)
 	read -ra pads <<<"${PADS:-0 4096 8192 12288 16384 20480 24576 28672 32768 36864 40960 45056 49152 53248 57344 61440}"
 	for r in 0 1 2; do
@@ -99,7 +115,8 @@ ab)
 		bins[new$tag]="$build/timing-new$tag"
 		compile "${bins[old$tag]}" "$old" "${flags[@]}"
 		compile "${bins[new$tag]}" "$root" "${flags[@]}"
-		arms+=("w.old$tag" "w.old$tag.2" "w.new$tag" "a.old$tag" "a.new$tag")
+		arms+=("w.old$tag" "w.old$tag.2" "w.new$tag")
+		[ "${AB_ROW:-single}" != single ] || arms+=("a.old$tag" "a.new$tag")
 	done
 	for ((r = 0; r < rounds; ++r)); do
 		for ((k = 0; k < ${#arms[@]}; ++k)); do
@@ -112,7 +129,7 @@ ab)
 		tag=${v%%=*}
 		echo "== variant '$tag': w.new$tag against w.old$tag (twin w.old$tag.2); a.new$tag against a.old$tag (layout alone)"
 		python3 "$here/wheel_bench_summary.py" --ref "w.old$tag" --twin "w.old$tag.2" --arms "w.old$tag,w.old$tag.2,w.new$tag" "$log"
-		python3 "$here/wheel_bench_summary.py" --ref "a.old$tag" --twin none --arms "a.old$tag,a.new$tag" "$log" | grep '/a\.'
+		[ "${AB_ROW:-single}" != single ] || python3 "$here/wheel_bench_summary.py" --ref "a.old$tag" --twin none --arms "a.old$tag,a.new$tag" "$log" | grep '/a\.'
 	done
 	exit 0
 	;;

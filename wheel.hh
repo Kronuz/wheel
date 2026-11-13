@@ -153,16 +153,23 @@ public:
 		const std::uint64_t first = cursor_;
 		cursor_ = last;
 		if ((first >> 12) != (last >> 12)) { cascade(first, last); }
-		const std::uint64_t steps = last - first + 1 > slots ? slots : last - first + 1;
+		std::uint64_t left = last - first + 1 > slots ? slots : last - first + 1;
 		timer_entry** tail = &due_;  // the due list keeps slot order
-		for (std::uint64_t k = 0; k < steps; ++k) {
-			const std::size_t s = (first + k) & mask;
-			if (!(bits_[s / 64] & (std::uint64_t{1} << (s % 64)))) { continue; }
-			for (timer_entry* e = head_[s]; e;) {
-				timer_entry* following = e->next;
-				if (e->deadline <= now) { tail = detach(*e, tail); }
-				e = following;
+		// The occupied slots of [first, first + left), a bitmap word at a time: a far jump skips empty time.
+		for (std::size_t s = first & mask; left;) {
+			const std::size_t bit = s % 64;
+			const std::uint64_t span = std::min<std::uint64_t>(left, 64 - bit);
+			std::uint64_t word = bits_[s / 64] >> bit;
+			if (span < 64) { word &= (std::uint64_t{1} << span) - 1; }
+			for (; word; word &= word - 1) {
+				for (timer_entry* e = head_[s + static_cast<std::size_t>(std::countr_zero(word))]; e;) {
+					timer_entry* following = e->next;
+					if (e->deadline <= now) { tail = detach(*e, tail); }
+					e = following;
+				}
 			}
+			s = (s + span) & mask;
+			left -= span;
 		}
 		expiring_ = true;
 		std::size_t fired = 0;

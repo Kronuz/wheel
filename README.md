@@ -120,6 +120,11 @@ burst of arms faster than the owner can file them delays the fires due inside it
 owner needs to drain it, and an event loop that sleeps until `next()` pays the bitmap words it
 crosses (the cross-thread lateness and sparse-wake rows in the docs have the numbers).
 
+## 📚 Documentation
+
+- [Who Owns the Wheel](https://kronuz.github.io/blog/retiring-the-sparse-wheel/):
+  the Familiars post on why it exists and how it works.
+
 ## License
 
 MIT; see [LICENSE](LICENSE).
